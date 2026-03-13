@@ -1,0 +1,13 @@
+# Godot cache & generated files
+.godot/shader_cache/
+.godot/editor/
+.godot/uid_cache.bin
+.godot/scene_groups_cache.cfg
+.godot/global_script_class_cache.cfg
+
+# Claude local settings
+.claude/
+
+# OS
+Thumbs.db
+.DS_Store
