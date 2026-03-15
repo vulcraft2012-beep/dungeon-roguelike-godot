@@ -10,12 +10,13 @@ scenes/       — .tscn scene files (player, enemy, lockpick_minigame, main)
 scripts/      — GDScript logic
   main.gd         — game manager: creates player, room, camera, darkness, HUD
   player.gd       — player controller
-  room.gd         — cave generation + enemy/portal/chest/torch spawning
-  enemy.gd        — 4 enemy classes
+  room.gd         — cave generation + enemy/portal/chest/torch spawning + door challenges
+  enemy.gd        — 4 enemy classes + spear variant + crystal targeting
   skeleton_portal.gd — Portal Eye Monster
   projectile.gd   — arrow, bolt, hammer, grenade
   torch.gd        — PointLight2D torch with flicker
-  door.gd         — locked door with [E] interact
+  door.gd         — locked door with [E] interact, dynamic labels
+  crystal.gd      — defense crystal for level 3 challenge
   lockpick_minigame.gd
   hud.gd
   game_over.gd
@@ -60,6 +61,15 @@ scripts/      — GDScript logic
 
 Weighted spawn: Archer=3, Thrower=3, Crossbow=2, Shieldman=1
 
+### Spear Shieldman variant
+- `is_spear = true` on SHIELDMAN class
+- attack_range = 40 (vs 22 normal), longer spear thrust
+- Used as door guardians on level 2, 5, 8...
+
+### Crystal targeting
+- `crystal_target` on enemy → enemy moves to and attacks ONLY the crystal
+- Used for crystal defense challenge on level 3, 6, 9...
+
 ## Portal Eye Monster (skeleton_portal.gd)
 
 - Extends `CharacterBody2D`, collision_layer = 2
@@ -84,11 +94,28 @@ Weighted spawn: Archer=3, Thrower=3, Crossbow=2, Shieldman=1
 - `PointLight2D` on each torch + on player
 - Enemies and portals spawn in dark zones (away from torches)
 
+## Door challenges (per level)
+
+| Level pattern | Challenge | Details |
+|---------------|-----------|---------|
+| 1, 4, 7... | Lockpick | Level 1 = difficulty 4; others = min(level, 5) |
+| 2, 5, 8... | Guardians | 2 spear shieldmen spawn at door, kill both to pass |
+| 3, 6, 9... | Crystal | Crystal (3+ HP) spawns, 4 enemies attack it, defend to pass |
+
+## Scaling
+
+- Enemy speed: `30 + level * 5` per level
+- Enemy damage: `1 + level/3`, **doubled at level 5+**
+- Cave fill_rate: `0.48 + level * 0.006` (tighter passages)
+- Guardian/crystal enemies also scale with level
+
 ## Known patterns / gotchas
 
 - Enemy `died` signal passes the enemy as argument: `signal died(enemy)`
 - Door signal: `signal door_interact(door)`
 - Portal signal: `signal skeleton_died(portal)`
+- Room `challenge_complete` signal emitted when guardians/crystal challenge done
 - Player `heal(amount)` clamps to max_health and emits `health_changed`
 - Room `caves` array must be populated before main.gd accesses it in `_load_room()`
 - `_draw()` is called once (static room); call `queue_redraw()` only on state change (e.g. chest opens)
+- `crystal.gd` extends Node2D, has `take_damage()`, signals `crystal_destroyed`/`crystal_survived`

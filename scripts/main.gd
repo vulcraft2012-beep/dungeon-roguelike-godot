@@ -109,6 +109,7 @@ func _load_room():
 	current_room.setup(current_level, enemy_scene, player)
 	current_room.room_cleared.connect(_on_room_cleared)
 	current_room.door_used.connect(_on_door_used)
+	current_room.challenge_complete.connect(_on_challenge_complete)
 
 	# Player starts in the start cave
 	var start_cave = null
@@ -121,6 +122,13 @@ func _load_room():
 	else:
 		player.position = Vector2(60, current_room.floor_y - 1)
 	player.velocity = Vector2.ZERO
+
+	# Reset per-level items
+	player.has_lockpick = false
+	player.ore_mined = 0
+	# Keep pickaxe if already obtained, but reset on new game
+	if current_room.challenge_type != "lockpick" and current_room.challenge_type != "crystal":
+		player.using_pickaxe = false
 
 	# Adjust darkness based on level
 	var dark_factor = max(0.08, 0.18 - current_level * 0.012)
@@ -144,19 +152,57 @@ func _on_door_used(door):
 		return
 
 	pending_door = door
-	lockpick_ui.start_lockpick(mini(current_level, 5))
 
-func _on_lockpick_success():
+	match current_room.challenge_type:
+		"lockpick":
+			if not player.has_lockpick:
+				hud.show_message("Find the pickaxe! Mine 6 ore to craft a lockpick!", 3.0)
+				pending_door = null
+				return
+			var diff = current_room.get_lockpick_difficulty()
+			lockpick_ui.start_lockpick(diff)
+		"guardians":
+			if current_room.challenge_complete_flag:
+				_complete_door()
+			elif not current_room.challenge_started:
+				current_room.start_guardian_challenge(enemy_scene)
+				hud.show_message("KILL THE GUARDIANS!", 3.0)
+			else:
+				hud.show_message("Kill the guardians first!", 2.0)
+		"crystal":
+			if current_room.challenge_complete_flag:
+				_complete_door()
+			elif not current_room.challenge_started or (current_room.crystal_node and current_room.crystal_node.is_destroyed):
+				if player.ore_mined < player.ore_needed:
+					hud.show_message("Mine 6 ore to craft the crystal!", 3.0)
+					pending_door = null
+					return
+				current_room.start_crystal_placement()
+				hud.show_message("CRYSTAL PLACED! DEFEND IT!", 3.0)
+			else:
+				hud.show_message("Defend the crystal!", 2.0)
+
+func _on_challenge_complete():
+	hud.show_message("Challenge Complete!", 2.0)
+	await get_tree().create_timer(0.5).timeout
+	if pending_door:
+		_complete_door()
+	elif current_room.doors.size() > 0:
+		pending_door = current_room.doors[0]
+		_complete_door()
+
+func _complete_door():
 	if pending_door:
 		pending_door.unlock()
 		pending_door = null
 		hud.show_message("Door Unlocked!", 1.5)
-
 		player.heal(1)
-
 		await get_tree().create_timer(1.0).timeout
 		current_level += 1
 		_load_room()
+
+func _on_lockpick_success():
+	_complete_door()
 
 func _on_lockpick_failed():
 	pending_door = null

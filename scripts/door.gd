@@ -4,6 +4,7 @@ signal door_interact(door)
 
 @export var difficulty: int = 1
 @export var is_locked: bool = true
+@export var door_label: String = "[E] Pick Lock"
 
 var player_nearby: bool = false
 var interact_area: Area2D
@@ -80,7 +81,7 @@ func _draw():
 
 		if player_nearby:
 			draw_string(ThemeDB.fallback_font, Vector2(-24, -36),
-				"[E] Pick Lock", HORIZONTAL_ALIGNMENT_CENTER, -1, 8, Color(1, 1, 0.5))
+				door_label, HORIZONTAL_ALIGNMENT_CENTER, -1, 8, Color(1, 1, 0.5))
 	else:
 		# Open door - dark opening
 		draw_rect(Rect2(-6, -30, 12, 32), Color(0.02, 0.02, 0.02))

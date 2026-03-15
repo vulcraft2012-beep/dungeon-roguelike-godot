@@ -28,12 +28,23 @@ var is_attacking_melee: bool = false
 var melee_anim_timer: float = 0.0
 var is_blocking: bool = false
 
+# Spear variant (longer range shieldman)
+var is_spear: bool = false
+var spear_range: float = 40.0
+
+# Crystal targeting (for crystal defense challenge)
+var crystal_target: Node2D = null
+
 # Shield stun mechanic
 var shield_hit_count: int = 0
 var shield_hits_to_stun: int = 3
 var is_stunned: bool = false
 var stun_timer: float = 0.0
-var stun_duration: float = 2.0
+var stun_duration: float = 3.0
+var shield_broken: bool = false  # Permanent shield break after 3 hits
+
+# Special drop
+var drops_pickaxe: bool = false
 
 # Projectile scene reference
 var projectile_script = preload("res://scripts/projectile.gd")
@@ -91,10 +102,15 @@ func _setup_class():
 			attack_cooldown = 2.5
 			speed = 30.0
 		EnemyClass.SHIELDMAN:
-			attack_range = 22.0
-			attack_cooldown = 1.2
-			speed = 40.0
-			max_health += 2
+			if is_spear:
+				attack_range = spear_range  # 40 vs normal 22
+				attack_cooldown = 2.0  # Slower attacks
+				speed = 28.0  # Slower movement
+			else:
+				attack_range = 22.0
+				attack_cooldown = 1.8  # Slower attacks
+				speed = 30.0  # Slower movement
+			max_health += 1  # Less bonus HP (was +2)
 			health = max_health
 
 func _process(delta):
@@ -103,8 +119,9 @@ func _process(delta):
 		stun_timer -= delta
 		if stun_timer <= 0:
 			is_stunned = false
-			shield_hit_count = 0
-			is_blocking = false
+			# Shield stays broken permanently — no more blocking
+			if shield_broken:
+				is_blocking = false
 		queue_redraw()
 		return  # Don't process anything else while stunned
 
@@ -148,6 +165,29 @@ func _physics_process(delta):
 	var dist_to_player = INF
 	var dir_to_player = Vector2.ZERO
 
+	# Crystal targeting: enemies attack ONLY the crystal
+	if crystal_target and is_instance_valid(crystal_target) and not crystal_target.is_destroyed:
+		var dir_to_crystal = crystal_target.global_position - global_position
+		var dist_to_crystal = dir_to_crystal.length()
+		facing_right = dir_to_crystal.x > 0
+
+		if dist_to_crystal > attack_range + 5:
+			move_x = sign(dir_to_crystal.x) * speed
+		elif can_attack:
+			_attack_crystal()
+
+		if knockback_velocity.length() > 10:
+			velocity.x = knockback_velocity.x
+			knockback_velocity *= 0.85
+		else:
+			knockback_velocity = Vector2.ZERO
+			velocity.x = move_x
+
+		move_and_slide()
+		if is_on_wall():
+			patrol_dir *= -1
+		return
+
 	if player and is_instance_valid(player):
 		dir_to_player = player.global_position - global_position
 		dist_to_player = dir_to_player.length()
@@ -172,7 +212,7 @@ func _physics_process(delta):
 						_throw_attack(dir_to_player)
 
 				EnemyClass.SHIELDMAN:
-					is_blocking = dist_to_player < 60
+					is_blocking = dist_to_player < 40 and dist_to_player > 10 and not shield_broken
 					if dist_to_player > attack_range:
 						move_x = sign(dir_to_player.x) * speed
 					elif can_attack:
@@ -242,14 +282,23 @@ func _melee_attack():
 			var dir = (player.global_position - global_position).normalized()
 			player.take_damage(damage, dir)
 
+func _attack_crystal():
+	can_attack = false
+	attack_timer = attack_cooldown
+	is_attacking_melee = true
+	melee_anim_timer = 0.25
+
+	if crystal_target and is_instance_valid(crystal_target) and not crystal_target.is_destroyed:
+		crystal_target.take_damage(1)
+
 func _on_touch_player(body):
 	if body.has_method("take_damage") and can_attack and enemy_class == EnemyClass.SHIELDMAN and not is_stunned:
 		_melee_attack()
 
 func take_damage(amount: int, knockback_dir: Vector2 = Vector2.ZERO):
-	# Stunned enemies take full damage, no blocking
+	# Stunned enemies take DOUBLE damage
 	if is_stunned:
-		health -= amount
+		health -= amount * 2
 		is_hit = true
 		hit_flash_timer = 0.15
 		knockback_velocity = knockback_dir * 100
@@ -270,12 +319,13 @@ func take_damage(amount: int, knockback_dir: Vector2 = Vector2.ZERO):
 			hit_flash_timer = 0.1
 
 			if shield_hit_count >= shield_hits_to_stun:
-				# STUNNED! Shield breaks temporarily
+				# STUNNED! Shield breaks PERMANENTLY
 				is_stunned = true
 				stun_timer = stun_duration
 				is_blocking = false
-				knockback_velocity = knockback_dir * 100
-				knockback_velocity.y = -50
+				shield_broken = true  # Shield destroyed forever
+				knockback_velocity = knockback_dir * 120
+				knockback_velocity.y = -60
 			return
 
 	health -= amount
@@ -296,6 +346,15 @@ func _draw():
 		EnemyClass.CROSSBOW: _draw_crossbow(s)
 		EnemyClass.THROWER: _draw_thrower(s)
 		EnemyClass.SHIELDMAN: _draw_shieldman(s)
+
+	# Pickaxe drop indicator (floating icon above head)
+	if drops_pickaxe:
+		var bob = sin(Time.get_ticks_msec() * 0.004) * 2
+		# Mini pickaxe icon
+		draw_line(Vector2(-3, -30 + bob), Vector2(3, -36 + bob), Color(0.55, 0.35, 0.15), 2.0)
+		draw_line(Vector2(1, -37 + bob), Vector2(5, -34 + bob), Color(0.7, 0.7, 0.75), 2.5)
+		# Glow
+		draw_circle(Vector2(0, -33 + bob), 6, Color(1, 0.8, 0.3, 0.15))
 
 	# Hit flash overlay
 	if is_hit:
@@ -411,12 +470,17 @@ func _draw_shieldman(s: int):
 		draw_rect(Rect2(s, -19, 2, 1), Color(0.6, 0.15, 0.1))
 
 	# Shield
-	if is_blocking and not is_stunned:
+	if shield_broken:
+		# Broken shield pieces on the ground
+		draw_rect(Rect2(s * 3, -2, 4, 3), Color(0.4, 0.12, 0.08, 0.5))
+		draw_rect(Rect2(s * 6, -1, 3, 2), Color(0.45, 0.15, 0.1, 0.4))
+		draw_rect(Rect2(s * 1, 0, 2, 1), Color(0.35, 0.1, 0.06, 0.3))
+	elif is_blocking and not is_stunned:
 		var sx = s * 9
 		draw_rect(Rect2(sx - 4, -20, 7, 17), Color(0.5, 0.15, 0.1))
 		draw_rect(Rect2(sx - 3, -19, 5, 15), Color(0.55, 0.2, 0.12))
 		draw_rect(Rect2(sx - 1, -15, 2, 2), Color(0.7, 0.6, 0.2))
-		# Shield hit indicators
+		# Shield hit indicators (cracks)
 		if shield_hit_count > 0:
 			for i in shield_hit_count:
 				var crack_y = -17 + i * 5
@@ -429,17 +493,42 @@ func _draw_shieldman(s: int):
 		var sx = s * 5
 		draw_rect(Rect2(sx - 3, -6, 6, 7), Color(0.45, 0.12, 0.08, 0.7))
 
-	# Sword - horizontal swing like player
-	if is_attacking_melee:
-		var swing_progress = 1.0 - (melee_anim_timer / 0.25)
-		var base = Vector2(s * 5, -12)
-		var angle = lerp(-0.6, 1.0, swing_progress) * s
-		var tip = base + Vector2(cos(angle) * 18, sin(angle) * 8 - 2)
-		draw_line(base, tip, Color(0.8, 0.8, 0.85), 2.5)
-		draw_line(base + Vector2(0, -3), base + Vector2(0, 3), Color(0.6, 0.5, 0.2), 2.0)
-	elif not is_stunned:
-		draw_line(Vector2(s * 6, -16), Vector2(s * 7, -3), Color(0.7, 0.7, 0.78), 2.0)
-		draw_line(Vector2(s * 4, -16), Vector2(s * 8, -16), Color(0.5, 0.4, 0.2), 1.5)
+	# Weapon - spear or sword
+	if is_spear:
+		# Spear variant
+		if is_attacking_melee:
+			var swing_progress = 1.0 - (melee_anim_timer / 0.25)
+			# Thrust forward
+			var thrust_x = lerp(float(s * 5), float(s * 28), swing_progress)
+			draw_line(Vector2(s * 3, -12), Vector2(thrust_x, -12), Color(0.5, 0.35, 0.15), 2.0)
+			# Spear tip
+			var tip_points = PackedVector2Array([
+				Vector2(thrust_x, -15), Vector2(thrust_x + s * 6, -12), Vector2(thrust_x, -9)
+			])
+			draw_colored_polygon(tip_points, Color(0.75, 0.75, 0.8))
+		elif not is_stunned:
+			# Idle spear - held diagonally
+			draw_line(Vector2(s * 4, -6), Vector2(s * 12, -26), Color(0.5, 0.35, 0.15), 2.0)
+			# Spear tip
+			var tip_points = PackedVector2Array([
+				Vector2(s * 12, -29), Vector2(s * 14, -26), Vector2(s * 12, -23)
+			])
+			draw_colored_polygon(tip_points, Color(0.75, 0.75, 0.8))
+		else:
+			# Spear drooping
+			draw_line(Vector2(s * 5, -6), Vector2(s * 14, 0), Color(0.5, 0.35, 0.15), 2.0)
 	else:
-		# Sword drooping during stun
-		draw_line(Vector2(s * 5, -8), Vector2(s * 8, 0), Color(0.6, 0.6, 0.65), 2.0)
+		# Sword - horizontal swing like player
+		if is_attacking_melee:
+			var swing_progress = 1.0 - (melee_anim_timer / 0.25)
+			var base = Vector2(s * 5, -12)
+			var angle = lerp(-0.6, 1.0, swing_progress) * s
+			var tip = base + Vector2(cos(angle) * 18, sin(angle) * 8 - 2)
+			draw_line(base, tip, Color(0.8, 0.8, 0.85), 2.5)
+			draw_line(base + Vector2(0, -3), base + Vector2(0, 3), Color(0.6, 0.5, 0.2), 2.0)
+		elif not is_stunned:
+			draw_line(Vector2(s * 6, -16), Vector2(s * 7, -3), Color(0.7, 0.7, 0.78), 2.0)
+			draw_line(Vector2(s * 4, -16), Vector2(s * 8, -16), Color(0.5, 0.4, 0.2), 1.5)
+		else:
+			# Sword drooping during stun
+			draw_line(Vector2(s * 5, -8), Vector2(s * 8, 0), Color(0.6, 0.6, 0.65), 2.0)

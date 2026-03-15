@@ -2,6 +2,7 @@ extends Node2D
 
 signal room_cleared
 signal door_used(door)
+signal challenge_complete
 
 var room_width: float = 1200.0
 var room_height: float = 700.0
@@ -33,6 +34,7 @@ var caves: Array = []      # For main.gd compatibility
 
 var torch_script = preload("res://scripts/torch.gd")
 var portal_script = preload("res://scripts/skeleton_portal.gd")
+var crystal_script = preload("res://scripts/crystal.gd")
 
 # Portal system
 var portals: Array = []
@@ -42,6 +44,19 @@ var player_ref: CharacterBody2D = null
 
 # Chests
 var chests: Array = []
+
+# Ore blocks (for lockpick crafting)
+var ore_blocks: Array = []  # {x, y, mined, area}
+var pickaxe_enemy: CharacterBody2D = null  # The mob that drops pickaxe
+
+# Door challenge system
+# "lockpick" = normal lockpick, "guardians" = kill spear shieldmen, "crystal" = defend crystal
+var challenge_type: String = "lockpick"
+var challenge_started: bool = false
+var challenge_complete_flag: bool = false
+var door_guardians: Array = []
+var crystal_node: Node2D = null
+var crystal_attackers: Array = []
 
 func _ready():
 	grid_cols = int(room_width / tile_size)
@@ -53,14 +68,34 @@ func setup(level: int, enemy_scene: PackedScene, p_player_ref: CharacterBody2D):
 	room_level = level
 	player_ref = p_player_ref
 	_set_biome(level)
+	_determine_challenge_type()
 	_generate_cave()
 	_build_collision()
 	_place_torches()
 	_calculate_dark_zones()
 	_spawn_enemies(enemy_scene, p_player_ref)
+	if challenge_type == "lockpick" or challenge_type == "crystal":
+		_spawn_ore_blocks()
+	if challenge_type == "lockpick":
+		_spawn_pickaxe_mob(enemy_scene, p_player_ref)
 	_spawn_door()
 	portal_spawn_timer = randf_range(4.0, 7.0)
 	portal_spawn_interval = max(5.0, 10.0 - room_level * 0.5)
+
+func _determine_challenge_type():
+	# Level 1: hard lockpick (difficulty 4)
+	# Level 2: spear shieldmen guardians
+	# Level 3: crystal defense
+	# Level 4+: lockpick (normal scaling)
+	# Pattern repeats: 5=guardians, 6=crystal, 7+=lockpick, etc.
+	var cycle = (room_level - 1) % 3
+	match cycle:
+		0:  # Levels 1, 4, 7...
+			challenge_type = "lockpick"
+		1:  # Levels 2, 5, 8...
+			challenge_type = "guardians"
+		2:  # Levels 3, 6, 9...
+			challenge_type = "crystal"
 
 func _set_biome(level: int):
 	match (level - 1) % 4:
@@ -102,9 +137,9 @@ func _generate_cave():
 			row.append(1)
 		grid.append(row)
 
-	# Random fill - carve out open spaces
-	var fill_rate = 0.48 + room_level * 0.003
-	fill_rate = minf(fill_rate, 0.55)
+	# Random fill - carve out open spaces (harder passages at higher levels)
+	var fill_rate = 0.48 + room_level * 0.006
+	fill_rate = minf(fill_rate, 0.58)
 	for r in range(3, grid_rows - 3):
 		for c in range(3, grid_cols - 3):
 			if randf() > fill_rate:
@@ -175,7 +210,6 @@ func _generate_cave():
 	var chest_count = 0
 	var max_chests = 1 + room_level / 3
 	max_chests = mini(max_chests, 3)
-
 	for b in num_branches:
 		# Pick a random open tile as branch origin
 		var origin_r = 0
@@ -204,8 +238,8 @@ func _generate_cave():
 			br = clampi(br, 3, grid_rows - 4)
 			bc = clampi(bc, 3, grid_cols - 4)
 
-			# Carve 2x2
-			for dr in range(-1, 2):
+			# Carve 3-wide with headroom
+			for dr in range(-2, 2):
 				for dc in range(-1, 2):
 					var nr = br + dr
 					var nc = bc + dc
@@ -282,6 +316,15 @@ func _generate_cave():
 	_carve_room(door_r, door_c, 5, 3)
 	_make_floor(door_r + 3, door_c - 1, 7)
 
+	# Flood fill from start to find disconnected caves, re-carve paths to them
+	_ensure_all_caves_reachable(start_r, start_c)
+
+	# Ensure minimum headroom above all floors so player can jump
+	_ensure_headroom()
+
+	# Add stepping stones in tall open shafts so player can climb out
+	_add_stepping_stones()
+
 	# Extract platforms list for spawn positioning
 	_extract_floor_positions()
 
@@ -345,13 +388,154 @@ func _carve_path(sr: int, sc: int, er: int, ec: int):
 		r = clampi(r, 3, grid_rows - 4)
 		c = clampi(c, 3, grid_cols - 4)
 
-		# Carve 3-wide tunnel
-		for dr in range(-1, 2):
+		# Carve 4-wide tunnel with extra headroom
+		for dr in range(-2, 2):
 			for dc in range(-1, 2):
 				var nr = r + dr
 				var nc = c + dc
 				if nr > 2 and nr < grid_rows - 3 and nc > 2 and nc < grid_cols - 3:
 					grid[nr][nc] = 0
+
+func _ensure_headroom():
+	# Scan all floor tiles — if ceiling is too close above, remove blocks
+	# Player needs ~5 tiles (80px) of headroom to jump (jump_force=-300, gravity=650)
+	var min_headroom = 5
+
+	for r in range(4, grid_rows - 3):
+		for c in range(3, grid_cols - 3):
+			# Check if this is a floor surface (solid with open above)
+			if grid[r][c] == 1 and grid[r - 1][c] == 0:
+				# Count open tiles above this floor
+				var headroom = 0
+				for h in range(1, min_headroom + 2):
+					if r - h < 3:
+						break
+					if grid[r - h][c] == 0:
+						headroom += 1
+					else:
+						break
+
+				# If headroom is too small, carve upward
+				if headroom < min_headroom and headroom > 0:
+					for h in range(1, min_headroom + 1):
+						var tr = r - h
+						if tr > 3 and tr < grid_rows - 3:
+							grid[tr][c] = 0
+							# Also widen 1 tile to each side for comfort
+							if c - 1 > 3:
+								grid[tr][c - 1] = 0
+							if c + 1 < grid_cols - 3:
+								grid[tr][c + 1] = 0
+
+	# Also ensure all carved paths have minimum 3-wide vertical clearance
+	# Scan for narrow horizontal pinch points (single-tile gaps)
+	for r in range(4, grid_rows - 4):
+		for c in range(4, grid_cols - 4):
+			if grid[r][c] == 0:
+				# Check vertical clearance
+				var above_solid = r - 1 >= 0 and grid[r - 1][c] == 1
+				var below_solid = r + 1 < grid_rows and grid[r + 1][c] == 1
+				if above_solid and below_solid:
+					# Single tile gap — too narrow, expand
+					if r - 1 > 3:
+						grid[r - 1][c] = 0
+					if r + 1 < grid_rows - 3:
+						grid[r + 1][c] = 0
+
+func _add_stepping_stones():
+	# Place sparse stepping stones in tall open shafts so player can climb out.
+	# Only place in very tall gaps, skip every other column, and ensure 3+ tiles
+	# open on each side so passages stay clear.
+	var min_gap_to_fix = 8  # Only fix gaps taller than 8 tiles (very tall shafts)
+	var stone_interval = 5  # Place a stone every 5 tiles vertically
+
+	for c in range(6, grid_cols - 6, 3):  # Every 3rd column only — much fewer stones
+		var open_run = 0
+		var run_start_r = -1
+
+		for r in range(3, grid_rows - 3):
+			if grid[r][c] == 0:
+				if open_run == 0:
+					run_start_r = r
+				open_run += 1
+			else:
+				if open_run > min_gap_to_fix:
+					var bottom_r = r - 1
+					var top_r = run_start_r
+					var stone_r = bottom_r - stone_interval
+					while stone_r > top_r + 3:
+						# Check passage isn't blocked: need 3+ open tiles on left OR right
+						var left_open = 0
+						var right_open = 0
+						for dc in range(1, 4):
+							if c - dc > 2 and grid[stone_r][c - dc] == 0:
+								left_open += 1
+							if c + dc < grid_cols - 3 and grid[stone_r][c + dc] == 0:
+								right_open += 1
+
+						# Only place if there's clear passage around it
+						var has_passage = left_open >= 2 or right_open >= 2
+						# Check above and below are open (don't seal vertically)
+						var vert_clear = true
+						if stone_r - 1 >= 0 and grid[stone_r - 1][c] == 1:
+							vert_clear = false
+						if stone_r + 1 < grid_rows and grid[stone_r + 1][c] == 1:
+							vert_clear = false
+
+						if has_passage and vert_clear:
+							grid[stone_r][c] = 1  # Just 1 tile wide — minimal blockage
+
+						stone_r -= stone_interval
+				open_run = 0
+				run_start_r = -1
+
+func _ensure_all_caves_reachable(start_r: int, start_c: int):
+	# Flood fill from start position
+	var visited = {}
+	var queue = [[start_r, start_c]]
+	visited[start_r * grid_cols + start_c] = true
+
+	while queue.size() > 0:
+		var cell = queue.pop_front()
+		var cr = cell[0]
+		var cc = cell[1]
+
+		for d in [[-1, 0], [1, 0], [0, -1], [0, 1]]:
+			var nr = cr + d[0]
+			var nc = cc + d[1]
+			if nr < 0 or nr >= grid_rows or nc < 0 or nc >= grid_cols:
+				continue
+			var key = nr * grid_cols + nc
+			if visited.has(key):
+				continue
+			if grid[nr][nc] == 0:
+				visited[key] = true
+				queue.append([nr, nc])
+
+	# Check each cave room — if not reachable, carve a path to it
+	for cave in caves:
+		var cave_r = int(cave.y / tile_size)
+		var cave_c = int(cave.x / tile_size)
+		cave_r = clampi(cave_r, 3, grid_rows - 4)
+		cave_c = clampi(cave_c, 3, grid_cols - 4)
+		var key = cave_r * grid_cols + cave_c
+		if not visited.has(key):
+			# Carve a path from start to this cave
+			_carve_path(start_r, start_c, cave_r, cave_c)
+			# Re-flood from this cave to mark newly connected areas
+			var q2 = [[cave_r, cave_c]]
+			visited[key] = true
+			while q2.size() > 0:
+				var cell = q2.pop_front()
+				for d in [[-1, 0], [1, 0], [0, -1], [0, 1]]:
+					var nr2 = cell[0] + d[0]
+					var nc2 = cell[1] + d[1]
+					if nr2 < 0 or nr2 >= grid_rows or nc2 < 0 or nc2 >= grid_cols:
+						continue
+					var k2 = nr2 * grid_cols + nc2
+					if not visited.has(k2) and grid[nr2][nc2] == 0:
+						visited[k2] = true
+						q2.append([nr2, nc2])
 
 func _extract_floor_positions():
 	platforms.clear()
@@ -408,7 +592,8 @@ func _add_wall(pos: Vector2, size: Vector2):
 	add_child(wall)
 
 func _place_chest(cx: float, cy: float):
-	chests.append({"x": cx, "y": cy, "opened": false})
+	var gives_blade = randf() < 0.5
+	chests.append({"x": cx, "y": cy, "opened": false, "blade": gives_blade})
 
 	var chest_area = Area2D.new()
 	chest_area.position = Vector2(cx, cy)
@@ -429,7 +614,13 @@ func _on_chest_touched(body, idx: int):
 		if not chests[idx].opened:
 			chests[idx].opened = true
 			if player_ref and is_instance_valid(player_ref):
-				player_ref.heal(2)
+				if chests[idx].blade:
+					if player_ref.has_blade:
+						player_ref.attack_damage += 1
+					else:
+						player_ref.has_blade = true
+				else:
+					player_ref.heal(2)
 			queue_redraw()
 
 func _place_torches():
@@ -516,8 +707,11 @@ func _spawn_enemies(enemy_scene: PackedScene, p_player_ref: CharacterBody2D):
 				shieldman_count += 1
 
 		var hp = 2 + room_level
-		var spd = 30.0 + room_level * 3
+		var spd = 30.0 + room_level * 5  # Faster scaling per level
 		var dmg = 1 + (room_level / 3)
+		# Level 5+: enemies deal 2x damage
+		if room_level >= 5:
+			dmg *= 2
 		if eclass == 3:
 			hp += 2
 
@@ -560,6 +754,15 @@ func _spawn_door():
 	var door = StaticBody2D.new()
 	door.set_script(door_script_res)
 	door.difficulty = mini(room_level, 5)
+
+	# Set door label based on challenge type
+	match challenge_type:
+		"lockpick":
+			door.door_label = "[E] Pick Lock (need lockpick)"
+		"guardians":
+			door.door_label = "[E] Summon Guardians"
+		"crystal":
+			door.door_label = "[E] Place Crystal (need ore)"
 
 	var door_cave = null
 	for cave in caves:
@@ -623,6 +826,10 @@ func _on_portal_died(portal):
 	portals.erase(portal)
 
 func _on_enemy_died(enemy):
+	# Check for pickaxe drop
+	if enemy.drops_pickaxe and player_ref and is_instance_valid(player_ref):
+		player_ref.has_pickaxe = true
+		player_ref.using_pickaxe = true  # Auto-equip
 	enemies.erase(enemy)
 	if enemies.size() == 0:
 		is_cleared = true
@@ -630,6 +837,319 @@ func _on_enemy_died(enemy):
 
 func _on_door_interact(door):
 	door_used.emit(door)
+
+# === DOOR CHALLENGES ===
+
+func get_lockpick_difficulty() -> int:
+	# Level 1: difficulty 4 (hard like level 4)
+	if room_level == 1:
+		return 4
+	return mini(room_level, 5)
+
+func start_guardian_challenge(enemy_scene: PackedScene):
+	if challenge_started and not challenge_complete_flag:
+		return
+	challenge_started = true
+	challenge_complete_flag = false
+
+	# Clean up old guardians
+	for g in door_guardians:
+		if is_instance_valid(g):
+			g.queue_free()
+	door_guardians.clear()
+
+	# Find door position
+	var door_pos = Vector2(600, 350)
+	if doors.size() > 0:
+		door_pos = doors[0].global_position
+
+	# Spawn 2 spear shieldmen on each side of door
+	for i in 2:
+		var guardian = enemy_scene.instantiate()
+		var side = -1 if i == 0 else 1
+		guardian.is_spear = true
+
+		var hp = 3 + room_level / 2
+		var spd = 30.0 + room_level * 3
+		var dmg = 1 + (room_level / 3)
+		if room_level >= 5:
+			dmg *= 2
+
+		guardian.setup(3, hp, spd, dmg)  # 3 = SHIELDMAN
+		guardian.player = player_ref
+		guardian.position = door_pos + Vector2(side * 40, 0)
+		add_child(guardian)
+		door_guardians.append(guardian)
+		guardian.died.connect(_on_guardian_died)
+
+func _on_guardian_died(enemy):
+	door_guardians.erase(enemy)
+	if door_guardians.size() == 0:
+		challenge_complete_flag = true
+		challenge_complete.emit()
+
+func start_crystal_challenge(enemy_scene: PackedScene):
+	# Clean up old challenge
+	if crystal_node and is_instance_valid(crystal_node):
+		crystal_node.queue_free()
+	for a in crystal_attackers:
+		if is_instance_valid(a):
+			a.queue_free()
+	crystal_attackers.clear()
+
+	challenge_started = true
+	challenge_complete_flag = false
+
+	# Find door position
+	var door_pos = Vector2(600, 350)
+	if doors.size() > 0:
+		door_pos = doors[0].global_position
+
+	# Spawn crystal near door
+	crystal_node = Node2D.new()
+	crystal_node.set_script(crystal_script)
+	crystal_node.position = door_pos + Vector2(-20, 0)
+	# Scale crystal HP with level
+	crystal_node.health = 3 + room_level / 3
+	crystal_node.max_health = crystal_node.health
+	add_child(crystal_node)
+	crystal_node.crystal_destroyed.connect(_on_crystal_destroyed)
+
+	# Spawn 4 random enemies that attack ONLY the crystal
+	var enemy_classes = [0, 2, 3]  # ARCHER, THROWER, SHIELDMAN
+	if room_level >= 3:
+		enemy_classes.append(1)  # CROSSBOW
+
+	for i in 4:
+		var attacker = enemy_scene.instantiate()
+		var eclass = enemy_classes[randi() % enemy_classes.size()]
+
+		var hp = 2 + room_level
+		var spd = 30.0 + room_level * 4
+		var dmg = 1  # Crystal attackers deal 1 damage to crystal
+		if eclass == 3:
+			hp += 2
+
+		attacker.setup(eclass, hp, spd, dmg)
+		attacker.player = player_ref
+		attacker.crystal_target = crystal_node  # They attack ONLY the crystal
+
+		# Spawn from edges of the room
+		var spawn_pos = _get_spawn_position()
+		# Ensure they spawn away from crystal
+		if spawn_pos.distance_to(crystal_node.position) < 100:
+			spawn_pos = _get_spawn_position()
+		attacker.position = spawn_pos
+		add_child(attacker)
+		crystal_attackers.append(attacker)
+		attacker.died.connect(_on_crystal_attacker_died)
+
+func _on_crystal_attacker_died(enemy):
+	crystal_attackers.erase(enemy)
+	if crystal_attackers.size() == 0:
+		if crystal_node and is_instance_valid(crystal_node) and not crystal_node.is_destroyed:
+			challenge_complete_flag = true
+			challenge_complete.emit()
+
+func _on_crystal_destroyed():
+	# Crystal was destroyed — challenge failed
+	# Attackers keep wandering, player can interact with door to retry
+	pass
+
+# === ORE & PICKAXE SYSTEM ===
+
+func _spawn_ore_blocks():
+	ore_blocks.clear()
+	var ore_count = 6
+	var placed = 0
+	var attempts = 0
+
+	# First, flood fill from start to know which open tiles are reachable
+	var reachable = {}
+	var start_cave = null
+	for cave in caves:
+		if cave.type == "start":
+			start_cave = cave
+			break
+	if start_cave:
+		var sr = int(start_cave.y / tile_size)
+		var sc = int(start_cave.x / tile_size)
+		sr = clampi(sr, 0, grid_rows - 1)
+		sc = clampi(sc, 0, grid_cols - 1)
+		var queue = [[sr, sc]]
+		reachable[sr * grid_cols + sc] = true
+		while queue.size() > 0:
+			var cell = queue.pop_front()
+			for d in [[-1, 0], [1, 0], [0, -1], [0, 1]]:
+				var nr2 = cell[0] + d[0]
+				var nc2 = cell[1] + d[1]
+				if nr2 < 0 or nr2 >= grid_rows or nc2 < 0 or nc2 >= grid_cols:
+					continue
+				var k = nr2 * grid_cols + nc2
+				if not reachable.has(k) and grid[nr2][nc2] == 0:
+					reachable[k] = true
+					queue.append([nr2, nc2])
+
+	while placed < ore_count and attempts < 300:
+		attempts += 1
+		var r = randi_range(5, grid_rows - 5)
+		var c = randi_range(5, grid_cols - 5)
+
+		# Must be solid
+		if grid[r][c] != 1:
+			continue
+
+		# Must have REACHABLE open space adjacent (connected to main cave)
+		var has_reachable_open = false
+		for d in [[-1, 0], [1, 0], [0, -1], [0, 1]]:
+			var nr = r + d[0]
+			var nc = c + d[1]
+			if nr > 0 and nr < grid_rows and nc > 0 and nc < grid_cols:
+				var k = nr * grid_cols + nc
+				if grid[nr][nc] == 0 and reachable.has(k):
+					has_reachable_open = true
+					break
+
+		if not has_reachable_open:
+			continue
+
+		# Check not too close to other ore (spread them out)
+		var too_close = false
+		for ore in ore_blocks:
+			if Vector2(ore.x, ore.y).distance_to(Vector2(c * tile_size + 8, r * tile_size + 8)) < 80:
+				too_close = true
+				break
+		if too_close:
+			continue
+
+		var ox = float(c * tile_size + 8)
+		var oy = float(r * tile_size + 8)
+
+		# Create Area2D for ore detection (detects player attack layer 16)
+		var ore_area = Area2D.new()
+		ore_area.collision_layer = 0
+		ore_area.collision_mask = 16  # player_attack
+		var oshape = CollisionShape2D.new()
+		var orect = RectangleShape2D.new()
+		orect.size = Vector2(16, 16)
+		oshape.shape = orect
+		ore_area.add_child(oshape)
+		ore_area.position = Vector2(ox, oy)
+		add_child(ore_area)
+
+		var ore_idx = placed
+		ore_blocks.append({"x": ox, "y": oy, "mined": false, "area": ore_area, "r": r, "c": c})
+		ore_area.area_entered.connect(_on_ore_hit.bind(ore_idx))
+		placed += 1
+
+func _on_ore_hit(attacker_area: Area2D, ore_idx: int):
+	if ore_idx >= ore_blocks.size():
+		return
+	if ore_blocks[ore_idx].mined:
+		return
+	if not player_ref or not is_instance_valid(player_ref):
+		return
+	if not player_ref.using_pickaxe or not player_ref.is_attacking:
+		return
+
+	# Mine the ore!
+	ore_blocks[ore_idx].mined = true
+	if ore_blocks[ore_idx].area and is_instance_valid(ore_blocks[ore_idx].area):
+		ore_blocks[ore_idx].area.queue_free()
+	player_ref.ore_mined += 1
+
+	# All ore mined = lockpick crafted!
+	if player_ref.ore_mined >= player_ref.ore_needed:
+		player_ref.has_lockpick = true
+
+	queue_redraw()
+
+func _spawn_pickaxe_mob(enemy_scene: PackedScene, p_player_ref: CharacterBody2D):
+	var enemy = enemy_scene.instantiate()
+	# Make it a thrower (visually distinct) with pickaxe drop
+	var hp = 3 + room_level
+	var spd = 25.0 + room_level * 3
+	var dmg = 1
+	enemy.setup(0, hp, spd, dmg)  # ARCHER class but with pickaxe flag
+	enemy.player = p_player_ref
+	enemy.drops_pickaxe = true
+
+	# Spawn in a reachable spot, not too far from start
+	var pos = _get_spawn_position()
+	for attempt in 10:
+		var candidate = _get_spawn_position()
+		# Prefer positions closer to start area
+		var start_cave = null
+		for cave in caves:
+			if cave.type == "start":
+				start_cave = cave
+				break
+		if start_cave and candidate.distance_to(Vector2(start_cave.x, start_cave.floor_y)) < pos.distance_to(Vector2(start_cave.x, start_cave.floor_y)):
+			pos = candidate
+
+	enemy.position = pos
+	add_child(enemy)
+	enemies.append(enemy)
+	enemy.died.connect(_on_enemy_died)
+	pickaxe_enemy = enemy
+
+func _on_pickaxe_enemy_died():
+	if player_ref and is_instance_valid(player_ref):
+		player_ref.has_pickaxe = true
+
+# === CRYSTAL PLACEMENT (Level 3 challenge) ===
+
+func start_crystal_placement():
+	# Player places crystal at their current position using mined ore
+	if not player_ref or not is_instance_valid(player_ref):
+		return
+	if player_ref.ore_mined < player_ref.ore_needed:
+		return
+
+	challenge_started = true
+	challenge_complete_flag = false
+
+	# Spawn crystal at player position
+	crystal_node = Node2D.new()
+	crystal_node.set_script(crystal_script)
+	crystal_node.position = player_ref.global_position + Vector2(0, -5)
+	crystal_node.health = 3 + room_level / 3
+	crystal_node.max_health = crystal_node.health
+	add_child(crystal_node)
+	crystal_node.crystal_destroyed.connect(_on_crystal_destroyed)
+
+	# Spawn 4 enemies that attack ONLY the crystal, near the crystal
+	var enemy_scene_ref = load("res://scenes/enemy.tscn")
+	var enemy_classes = [0, 2, 3]
+	if room_level >= 3:
+		enemy_classes.append(1)
+
+	for i in 4:
+		var attacker = enemy_scene_ref.instantiate()
+		var eclass = enemy_classes[randi() % enemy_classes.size()]
+		var hp = 2 + room_level
+		var spd = 30.0 + room_level * 4
+		var dmg = 1
+		if eclass == 3:
+			hp += 2
+		attacker.setup(eclass, hp, spd, dmg)
+		attacker.player = player_ref
+		attacker.crystal_target = crystal_node
+
+		# Spawn near crystal (within 60-120 px)
+		var angle = randf() * TAU
+		var dist = randf_range(60, 120)
+		var spawn_pos = crystal_node.position + Vector2(cos(angle) * dist, sin(angle) * dist * 0.5)
+		# Clamp to room bounds
+		spawn_pos.x = clampf(spawn_pos.x, 50, room_width - 50)
+		spawn_pos.y = clampf(spawn_pos.y, 50, room_height - 50)
+		attacker.position = spawn_pos
+		add_child(attacker)
+		crystal_attackers.append(attacker)
+		attacker.died.connect(_on_crystal_attacker_died)
+
+	# Reset player ore (used up to make crystal)
+	player_ref.ore_mined = 0
 
 # === DRAWING ===
 
@@ -650,6 +1170,9 @@ func _draw():
 
 	# Decorations
 	_draw_decorations()
+
+	# Ore blocks
+	_draw_ore_blocks()
 
 	# Chests
 	_draw_chests()
@@ -754,10 +1277,30 @@ func _draw_decorations():
 				draw_rect(Rect2(bx - 2, by - 4, 1, 1), Color(0.1, 0.1, 0.1, 0.3))
 				draw_rect(Rect2(bx + 1, by - 4, 1, 1), Color(0.1, 0.1, 0.1, 0.3))
 
+func _draw_ore_blocks():
+	for ore in ore_blocks:
+		if ore.mined:
+			continue
+		var ox = ore.x - 8
+		var oy = ore.y - 8
+		# Iron ore block - darker rock with metallic specks
+		draw_rect(Rect2(ox, oy, 16, 16), Color(0.35, 0.33, 0.3))
+		draw_rect(Rect2(ox + 1, oy + 1, 14, 14), Color(0.4, 0.38, 0.35))
+		# Iron specks (light metallic)
+		draw_rect(Rect2(ox + 3, oy + 3, 3, 2), Color(0.7, 0.65, 0.55))
+		draw_rect(Rect2(ox + 9, oy + 5, 2, 3), Color(0.75, 0.7, 0.6))
+		draw_rect(Rect2(ox + 5, oy + 10, 3, 2), Color(0.7, 0.65, 0.55))
+		draw_rect(Rect2(ox + 11, oy + 11, 2, 2), Color(0.65, 0.6, 0.5))
+		# Edge highlight
+		draw_rect(Rect2(ox, oy, 16, 1), Color(0.5, 0.48, 0.42))
+		# Glow effect
+		draw_circle(Vector2(ore.x, ore.y), 10, Color(0.8, 0.7, 0.4, 0.08))
+
 func _draw_chests():
 	for chest in chests:
 		var cx = chest.x
 		var cy = chest.y
+		var is_blade = chest.get("blade", false)
 
 		if chest.opened:
 			# Open chest body
@@ -769,9 +1312,6 @@ func _draw_chests():
 			draw_rect(Rect2(cx - 8, cy - 1, 16, 1), Color(0.6, 0.55, 0.3))
 			# Inside dark
 			draw_rect(Rect2(cx - 6, cy - 3, 12, 5), Color(0.2, 0.15, 0.08))
-			# Sparkle
-			var sp_t = sin(Time.get_ticks_msec() * 0.003) * 0.5 + 0.5
-			draw_circle(Vector2(cx, cy - 6), 2, Color(1.0, 0.9, 0.3, sp_t * 0.6))
 		else:
 			# Closed chest body
 			draw_rect(Rect2(cx - 8, cy - 4, 16, 10), Color(0.45, 0.3, 0.15))
@@ -784,6 +1324,13 @@ func _draw_chests():
 			# Lock
 			draw_rect(Rect2(cx - 2, cy - 5, 4, 4), Color(0.65, 0.6, 0.3))
 			draw_rect(Rect2(cx - 1, cy - 4, 2, 2), Color(0.3, 0.25, 0.1))
-			# Glow
-			var glow_t = sin(Time.get_ticks_msec() * 0.002) * 0.3 + 0.3
-			draw_circle(Vector2(cx, cy - 4), 12, Color(1.0, 0.8, 0.2, glow_t * 0.08))
+			# Glow - blue for blade, gold for heal
+			if is_blade:
+				draw_circle(Vector2(cx, cy - 4), 12, Color(0.3, 0.7, 1.0, 0.1))
+				# Blade icon on chest
+				draw_line(Vector2(cx - 4, cy - 7), Vector2(cx + 4, cy - 3), Color(0.4, 0.8, 1.0, 0.5), 1.5)
+			else:
+				draw_circle(Vector2(cx, cy - 4), 12, Color(1.0, 0.8, 0.2, 0.1))
+				# Cross icon (heal)
+				draw_rect(Rect2(cx - 1, cy - 7, 2, 4), Color(0.3, 0.9, 0.3, 0.5))
+				draw_rect(Rect2(cx - 2, cy - 6, 4, 2), Color(0.3, 0.9, 0.3, 0.5))

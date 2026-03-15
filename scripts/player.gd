@@ -49,25 +49,47 @@ var wall_jump_force: Vector2 = Vector2(180, -280)
 var wall_dir: int = 0  # -1 left wall, 1 right wall, 0 none
 var wall_jump_cooldown: float = 0.0
 
+# Heal ability (H key)
+var heal_charges: int = 3
+var max_heal_charges: int = 3
+var heal_amount: int = 1
+
+# Blade upgrade (from chests)
+var has_blade: bool = false
+
+# Lockpick item (crafted from ore)
+var has_lockpick: bool = false
+
+# Pickaxe (drops from special mob)
+var has_pickaxe: bool = false
+var using_pickaxe: bool = false  # Q to switch weapon
+
+# Ore mining progress
+var ore_mined: int = 0
+var ore_needed: int = 6
+
+var blade_cooldown: float = 0.12  # faster than normal 0.22
+
 var attack_area: Area2D
 var attack_shape: CollisionShape2D
+var body_collision: CollisionShape2D
 
 func _ready():
 	health = max_health
 	normal_collision_mask = 4 | 8  # walls + doors
 
-	var body_shape = CollisionShape2D.new()
+	body_collision = CollisionShape2D.new()
 	var rect = RectangleShape2D.new()
 	rect.size = Vector2(10, 22)
-	body_shape.shape = rect
-	body_shape.position = Vector2(0, -11)
-	add_child(body_shape)
+	body_collision.shape = rect
+	body_collision.position = Vector2(0, -11)
+	add_child(body_collision)
 
 	attack_area = Area2D.new()
 	attack_area.collision_layer = 16
 	attack_area.collision_mask = 2
 	attack_area.monitoring = true
-	attack_area.monitorable = false
+	attack_area.monitorable = true
 	add_child(attack_area)
 
 	attack_shape = CollisionShape2D.new()
@@ -111,6 +133,9 @@ func _process(delta):
 			invincible = false
 			collision_layer = 1
 			collision_mask = normal_collision_mask
+			# Restore normal collision size
+			body_collision.shape.size = Vector2(10, 22)
+			body_collision.position = Vector2(0, -11)
 
 	if roll_cooldown_timer > 0:
 		roll_cooldown_timer -= delta
@@ -124,13 +149,7 @@ func _process(delta):
 		if combo_reset_timer <= 0:
 			swing_index = 0
 
-	# Ledge climb
-	if is_grabbing_ledge:
-		climb_timer -= delta
-		if climb_timer <= 0:
-			is_grabbing_ledge = false
-			position.y = ledge_target_y - 12
-			velocity = Vector2.ZERO
+	# Ledge grab — just hang, wait for player input (handled in _physics_process)
 
 	queue_redraw()
 
@@ -138,10 +157,33 @@ func _physics_process(delta):
 	if is_dead:
 		return
 
-	# Ledge climbing - no physics
+	# Ledge climbing - easy jump off in any direction
 	if is_grabbing_ledge:
-		velocity = Vector2.ZERO
-		position.y = lerp(position.y, ledge_target_y - 12, delta * 12)
+		# A or D alone = jump off to that side (no need for Space)
+		if Input.is_action_just_pressed("move_left"):
+			is_grabbing_ledge = false
+			facing_right = false
+			velocity = Vector2(-180, -250)
+			return
+		elif Input.is_action_just_pressed("move_right"):
+			is_grabbing_ledge = false
+			facing_right = true
+			velocity = Vector2(180, -250)
+			return
+		# Space or W = climb up onto the ledge
+		elif Input.is_action_just_pressed("jump") or Input.is_action_just_pressed("move_up"):
+			is_grabbing_ledge = false
+			position.y = ledge_target_y - 14
+			velocity = Vector2(0, -60)
+			return
+		# S = drop down
+		elif Input.is_action_just_pressed("move_down"):
+			is_grabbing_ledge = false
+			velocity = Vector2(0, 50)
+			return
+		else:
+			velocity = Vector2.ZERO
+			position.y = lerp(position.y, ledge_target_y - 12, delta * 12)
 		return
 
 	velocity.y += gravity * delta
@@ -162,8 +204,6 @@ func _physics_process(delta):
 			facing_right = true
 
 	var current_speed = speed
-	if is_shielding:
-		current_speed *= 0.35
 	if is_attacking:
 		current_speed *= 0.55
 
@@ -210,15 +250,14 @@ func _physics_process(delta):
 			is_wall_sliding = false
 			facing_right = wall_dir < 0
 			wall_jump_cooldown = 0.15  # Brief cooldown to prevent re-sticking
+		elif not is_rolling and velocity.y > 0:
+			# Try ledge grab only on Space press while falling
+			_check_ledge_grab()
 
 	var side = 1 if facing_right else -1
 	attack_shape.position.x = 15 * side
 
 	move_and_slide()
-
-	# Ledge detection
-	if not is_on_floor() and velocity.y > 0 and not is_rolling and not is_wall_sliding:
-		_check_ledge_grab()
 
 func _check_ledge_grab():
 	var side = 1 if facing_right else -1
@@ -273,22 +312,32 @@ func _unhandled_input(event):
 
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
-			if can_attack and not is_shielding and not is_rolling and not is_grabbing_ledge:
+			if can_attack and not is_rolling and not is_grabbing_ledge:
 				_do_attack()
-		elif event.button_index == MOUSE_BUTTON_RIGHT:
-			if not is_rolling and not is_grabbing_ledge:
-				is_shielding = event.pressed
 
 	# Dodge roll on Shift
 	if event is InputEventKey and event.pressed and event.keycode == KEY_SHIFT:
-		if not is_rolling and roll_cooldown_timer <= 0 and not is_shielding and not is_grabbing_ledge:
+		if not is_rolling and roll_cooldown_timer <= 0 and not is_grabbing_ledge:
 			_do_roll()
+
+	# Weapon switch: 1 = sword/blade, 2 = pickaxe
+	if event is InputEventKey and event.pressed and event.keycode == KEY_1:
+		using_pickaxe = false
+	if event is InputEventKey and event.pressed and event.keycode == KEY_2:
+		if has_pickaxe:
+			using_pickaxe = true
+
+	# Heal on H
+	if event is InputEventKey and event.pressed and event.keycode == KEY_H:
+		if heal_charges > 0 and health < max_health and not is_dead:
+			heal_charges -= 1
+			heal(heal_amount)
 
 func _do_attack():
 	is_attacking = true
 	can_attack = false
-	attack_timer = attack_cooldown
-	attack_anim_timer = 0.15
+	attack_timer = blade_cooldown if has_blade else attack_cooldown
+	attack_anim_timer = 0.12 if has_blade else 0.15
 	attack_shape.disabled = false
 
 	combo_reset_timer = combo_reset_time
@@ -307,6 +356,10 @@ func _do_roll():
 	collision_layer = 0
 	collision_mask = 4
 
+	# Shrink collision to 1 tile height (16px) so player can roll through gaps
+	body_collision.shape.size = Vector2(10, 10)
+	body_collision.position = Vector2(0, -5)
+
 	if Input.is_action_pressed("move_left"):
 		roll_direction = -1.0
 	elif Input.is_action_pressed("move_right"):
@@ -315,7 +368,6 @@ func _do_roll():
 		roll_direction = 1.0 if facing_right else -1.0
 
 	is_attacking = false
-	is_shielding = false
 	attack_shape.disabled = true
 
 func _on_attack_hit(body):
@@ -327,16 +379,7 @@ func take_damage(amount: int, knockback_dir: Vector2 = Vector2.ZERO):
 	if invincible or is_rolling or is_dead:
 		return
 
-	var actual_damage = amount
-	if is_shielding:
-		var block_side = 1.0 if facing_right else -1.0
-		if sign(knockback_dir.x) != sign(block_side):
-			actual_damage = 0
-			velocity.x = knockback_dir.x * 60
-			move_and_slide()
-			return
-
-	health -= actual_damage
+	health -= amount
 	health_changed.emit(health)
 
 	velocity = knockback_dir * 140
@@ -355,19 +398,24 @@ func heal(amount: int):
 	health_changed.emit(health)
 
 func _draw():
-	# Roll animation
+	# Roll animation — flat/compressed (fits through 1-tile gaps)
 	if is_rolling:
 		var roll_progress = 1.0 - (roll_timer / roll_duration)
-		var roll_angle = roll_progress * TAU * 1.5
+		var roll_angle = roll_progress * TAU * 2.0
 		var s = 1 if roll_direction > 0 else -1
-		draw_circle(Vector2(-s * 6, -8), 8, Color(0.4, 0.6, 0.9, 0.12))
-		draw_circle(Vector2(0, -8), 9, Color(0.35, 0.35, 0.4))
-		draw_circle(Vector2(0, -8), 7, Color(0.42, 0.42, 0.48))
-		var lx = cos(roll_angle) * 6
-		var ly = sin(roll_angle) * 6
-		draw_line(Vector2(0, -8), Vector2(lx, -8 + ly), Color(0.6, 0.6, 0.65), 2.0)
-		draw_line(Vector2(-s * 12, -11), Vector2(-s * 18, -11), Color(1, 1, 1, 0.2), 1.0)
-		draw_line(Vector2(-s * 10, -6), Vector2(-s * 16, -6), Color(1, 1, 1, 0.15), 1.0)
+		# Flat rolling ball — only ~10px tall (1 tile = 16px)
+		draw_circle(Vector2(0, -5), 6, Color(0.35, 0.35, 0.4))
+		draw_circle(Vector2(0, -5), 4.5, Color(0.42, 0.42, 0.48))
+		# Spinning limb indicator
+		var lx = cos(roll_angle) * 4
+		var ly = sin(roll_angle) * 4
+		draw_line(Vector2(0, -5), Vector2(lx, -5 + ly), Color(0.6, 0.6, 0.65), 2.0)
+		# Speed trail
+		draw_line(Vector2(-s * 8, -7), Vector2(-s * 14, -7), Color(1, 1, 1, 0.2), 1.0)
+		draw_line(Vector2(-s * 7, -3), Vector2(-s * 12, -3), Color(1, 1, 1, 0.15), 1.0)
+		# Dust particles
+		if fmod(roll_progress * 10, 1.0) < 0.5:
+			draw_circle(Vector2(-s * 6, -1), 1.5, Color(0.6, 0.5, 0.3, 0.3))
 		return
 
 	# Wall slide animation
@@ -430,49 +478,87 @@ func _draw():
 	draw_rect(Rect2(-3 + s, -21, 5, 2), Color(0.08, 0.08, 0.1))
 	draw_rect(Rect2(s, -21, 2, 1), Color(0.35, 0.65, 0.95))
 
-	# --- SHIELD ---
-	if is_shielding:
-		var sx = s * 9
-		draw_rect(Rect2(sx - 3, -20, 6, 16), Color(0.55, 0.42, 0.2))
-		draw_rect(Rect2(sx - 2, -19, 4, 14), Color(0.5, 0.5, 0.58))
-		draw_rect(Rect2(sx - 1, -15, 2, 2), Color(0.75, 0.65, 0.2))
-		draw_rect(Rect2(sx - 3, -20, 1, 16), Color(0.65, 0.52, 0.25))
-		draw_rect(Rect2(sx + 2, -20, 1, 16), Color(0.65, 0.52, 0.25))
+	# --- WEAPON ---
+	if using_pickaxe:
+		_draw_pickaxe(s)
+	else:
+		_draw_sword(s)
 
-	# --- SWORD ---
+	# --- HEAL CHARGES indicator ---
+	if heal_charges > 0:
+		for i in heal_charges:
+			draw_circle(Vector2(-6 + i * 5, -28), 2, Color(0.3, 0.9, 0.3, 0.6))
+
+func _draw_sword(s: int):
+	var blade_col = Color(0.4, 0.85, 1.0) if has_blade else Color(0.85, 0.85, 0.92)
+	var blade_trail = Color(0.3, 0.7, 1.0, 0.2) if has_blade else Color(1, 1, 1, 0.15)
+	var blade_glow = Color(0.5, 0.9, 1.0, 0.4) if has_blade else Color(1, 1, 1, 0.3)
+	var blade_len = 24 if has_blade else 22
+	var anim_dur = 0.12 if has_blade else 0.15
+
 	if is_attacking:
-		var swing_progress = 1.0 - (attack_anim_timer / 0.15)
+		var swing_progress = 1.0 - (attack_anim_timer / anim_dur)
 		var base = Vector2(s * 5, -12)
-
 		match swing_index:
 			0:
 				var angle = lerp(-0.6, 1.0, swing_progress) * s
-				var tip = base + Vector2(cos(angle) * 22, sin(angle) * 6)
+				var tip = base + Vector2(cos(angle) * blade_len, sin(angle) * 6)
 				var trail_angle = lerp(-0.6, 1.0, max(0, swing_progress - 0.3)) * s
-				var trail_tip = base + Vector2(cos(trail_angle) * 20, sin(trail_angle) * 6)
-				draw_line(trail_tip, tip, Color(1, 1, 1, 0.15), 3.0)
-				draw_line(base, tip, Color(0.85, 0.85, 0.92), 2.5)
-				draw_line(base + Vector2(0, -1), tip + Vector2(0, -1), Color(1, 1, 1, 0.3), 1.0)
+				var trail_tip = base + Vector2(cos(trail_angle) * (blade_len - 2), sin(trail_angle) * 6)
+				draw_line(trail_tip, tip, blade_trail, 3.0)
+				draw_line(base, tip, blade_col, 2.5)
+				draw_line(base + Vector2(0, -1), tip + Vector2(0, -1), blade_glow, 1.0)
 				draw_line(base + Vector2(0, -3), base + Vector2(0, 3), Color(0.6, 0.5, 0.2), 2.5)
 			1:
 				var angle = lerp(1.0, -0.6, swing_progress) * s
-				var tip = base + Vector2(cos(angle) * 22, sin(angle) * 6)
+				var tip = base + Vector2(cos(angle) * blade_len, sin(angle) * 6)
 				var trail_angle = lerp(1.0, -0.6, max(0, swing_progress - 0.3)) * s
-				var trail_tip = base + Vector2(cos(trail_angle) * 20, sin(trail_angle) * 6)
-				draw_line(trail_tip, tip, Color(1, 1, 1, 0.15), 3.0)
-				draw_line(base, tip, Color(0.85, 0.85, 0.92), 2.5)
-				draw_line(base + Vector2(0, -1), tip + Vector2(0, -1), Color(1, 1, 1, 0.3), 1.0)
+				var trail_tip = base + Vector2(cos(trail_angle) * (blade_len - 2), sin(trail_angle) * 6)
+				draw_line(trail_tip, tip, blade_trail, 3.0)
+				draw_line(base, tip, blade_col, 2.5)
+				draw_line(base + Vector2(0, -1), tip + Vector2(0, -1), blade_glow, 1.0)
 				draw_line(base + Vector2(0, -3), base + Vector2(0, 3), Color(0.6, 0.5, 0.2), 2.5)
 			2:
 				var angle = lerp(-1.2, 0.8, swing_progress) * s
-				var tip = base + Vector2(cos(angle) * 24 * s, sin(angle) * 18)
+				var tip = base + Vector2(cos(angle) * (blade_len + 2) * s, sin(angle) * 18)
 				var trail_angle = lerp(-1.2, 0.8, max(0, swing_progress - 0.25)) * s
-				var trail_tip = base + Vector2(cos(trail_angle) * 22 * s, sin(trail_angle) * 18)
-				draw_line(trail_tip, tip, Color(1, 0.9, 0.5, 0.2), 4.0)
-				draw_line(base, tip, Color(0.9, 0.88, 0.95), 3.0)
-				draw_line(base + Vector2(0, -1), tip + Vector2(0, -1), Color(1, 1, 1, 0.4), 1.5)
+				var trail_tip = base + Vector2(cos(trail_angle) * blade_len * s, sin(trail_angle) * 18)
+				draw_line(trail_tip, tip, Color(blade_trail.r, blade_trail.g, blade_trail.b, 0.25), 4.0)
+				draw_line(base, tip, blade_col, 3.0)
+				draw_line(base + Vector2(0, -1), tip + Vector2(0, -1), blade_glow, 1.5)
 				draw_line(base + Vector2(0, -3), base + Vector2(0, 3), Color(0.6, 0.5, 0.2), 2.5)
 	else:
 		var sx = s * 7
-		draw_line(Vector2(sx, -15), Vector2(sx + s * 8, -10), Color(0.7, 0.7, 0.78), 2.0)
+		var idle_col = Color(0.5, 0.8, 0.95) if has_blade else Color(0.7, 0.7, 0.78)
+		draw_line(Vector2(sx, -15), Vector2(sx + s * 8, -10), idle_col, 2.0)
 		draw_line(Vector2(sx, -16), Vector2(sx, -12), Color(0.55, 0.42, 0.2), 2.0)
+
+func _draw_pickaxe(s: int):
+	if is_attacking:
+		var anim_dur = 0.15
+		var swing_progress = 1.0 - (attack_anim_timer / anim_dur)
+		var base = Vector2(s * 5, -12)
+		# Pickaxe swing arc
+		var angle = lerp(-0.8, 1.2, swing_progress) * s
+		var handle_end = base + Vector2(cos(angle) * 18, sin(angle) * 8)
+		# Handle (brown)
+		draw_line(base, handle_end, Color(0.55, 0.35, 0.15), 2.5)
+		# Pickaxe head (iron gray) - perpendicular to handle
+		var perp = Vector2(-sin(angle), cos(angle)) * s
+		var head_pos = handle_end
+		draw_line(head_pos - perp * 5, head_pos + perp * 5, Color(0.6, 0.6, 0.65), 3.0)
+		# Point tip
+		draw_line(head_pos + perp * 5, head_pos + perp * 7 + Vector2(cos(angle) * 3, sin(angle) * 3), Color(0.7, 0.7, 0.75), 2.0)
+		# Sparks when mining
+		if swing_progress > 0.7:
+			draw_circle(handle_end + Vector2(randf_range(-3, 3), randf_range(-3, 3)), 1.5, Color(1, 0.8, 0.3, 0.6))
+	else:
+		# Idle pickaxe - held over shoulder
+		var sx = s * 6
+		# Handle
+		draw_line(Vector2(sx, -8), Vector2(sx + s * 6, -20), Color(0.55, 0.35, 0.15), 2.5)
+		# Head
+		var hx = sx + s * 6
+		draw_line(Vector2(hx - 4, -22), Vector2(hx + 4, -18), Color(0.6, 0.6, 0.65), 3.0)
+		# Point
+		draw_line(Vector2(hx + 4, -18), Vector2(hx + 6, -17), Color(0.7, 0.7, 0.75), 2.0)
