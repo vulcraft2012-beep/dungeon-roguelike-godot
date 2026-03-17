@@ -70,10 +70,12 @@ func _draw():
 	var sparkle_x = cos(t * 2) * 4
 	draw_circle(Vector2(sparkle_x, sparkle_y), 1.5, Color(1, 1, 1, 0.6 + sin(t * 5) * 0.3))
 
-	# HP indicators
-	for i in max_health:
-		var col = Color(0, 1, 0.3, 0.7) if i < health else Color(0.3, 0.3, 0.3, 0.4)
-		draw_circle(Vector2(-6 + i * 6, 6), 2.5, col)
+	# HP bar
+	var bar_w = 30.0
+	var hp_frac = float(health) / max(max_health, 1)
+	draw_rect(Rect2(-bar_w / 2, 4, bar_w, 4), Color(0.2, 0, 0, 0.6))
+	var bar_col = Color(0, 1, 0.3, 0.7) if hp_frac > 0.3 else Color(1, 0.3, 0.1, 0.8)
+	draw_rect(Rect2(-bar_w / 2, 4, bar_w * hp_frac, 4), bar_col)
 
 	# "DEFEND" text with pulse
 	var alpha = 0.6 + sin(t * 2) * 0.3

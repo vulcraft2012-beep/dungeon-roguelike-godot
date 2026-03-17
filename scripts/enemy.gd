@@ -43,8 +43,9 @@ var stun_timer: float = 0.0
 var stun_duration: float = 3.0
 var shield_broken: bool = false  # Permanent shield break after 3 hits
 
-# Special drop
+# Special drops
 var drops_pickaxe: bool = false
+var drops_pearl: bool = false
 
 # Projectile scene reference
 var projectile_script = preload("res://scripts/projectile.gd")
@@ -110,7 +111,7 @@ func _setup_class():
 				attack_range = 22.0
 				attack_cooldown = 1.8  # Slower attacks
 				speed = 30.0  # Slower movement
-			max_health += 1  # Less bonus HP (was +2)
+			max_health += 20  # Bonus HP for shieldman (20x scale)
 			health = max_health
 
 func _process(delta):
@@ -212,7 +213,8 @@ func _physics_process(delta):
 						_throw_attack(dir_to_player)
 
 				EnemyClass.SHIELDMAN:
-					is_blocking = dist_to_player < 40 and dist_to_player > 10 and not shield_broken
+					var block_range = attack_range + 10 if is_spear else 40.0
+					is_blocking = dist_to_player < block_range and dist_to_player > 10 and not shield_broken
 					if dist_to_player > attack_range:
 						move_x = sign(dir_to_player.x) * speed
 					elif can_attack:
@@ -289,7 +291,7 @@ func _attack_crystal():
 	melee_anim_timer = 0.25
 
 	if crystal_target and is_instance_valid(crystal_target) and not crystal_target.is_destroyed:
-		crystal_target.take_damage(1)
+		crystal_target.take_damage(damage)
 
 func _on_touch_player(body):
 	if body.has_method("take_damage") and can_attack and enemy_class == EnemyClass.SHIELDMAN and not is_stunned:
@@ -310,7 +312,7 @@ func take_damage(amount: int, knockback_dir: Vector2 = Vector2.ZERO):
 
 	# Shieldman blocks from front
 	if enemy_class == EnemyClass.SHIELDMAN and is_blocking:
-		var attack_from_front = (facing_right and knockback_dir.x > 0) or (not facing_right and knockback_dir.x < 0)
+		var attack_from_front = (facing_right and knockback_dir.x < 0) or (not facing_right and knockback_dir.x > 0)
 		if attack_from_front:
 			# Shield hit! Count it
 			shield_hit_count += 1
@@ -346,6 +348,16 @@ func _draw():
 		EnemyClass.CROSSBOW: _draw_crossbow(s)
 		EnemyClass.THROWER: _draw_thrower(s)
 		EnemyClass.SHIELDMAN: _draw_shieldman(s)
+
+	# Pearl drop indicator
+	if drops_pearl:
+		var bob = sin(Time.get_ticks_msec() * 0.004) * 2
+		# Pearl circle
+		draw_circle(Vector2(0, -30 + bob), 4, Color(0.85, 0.85, 0.95, 0.7))
+		draw_circle(Vector2(0, -30 + bob), 2.5, Color(0.95, 0.95, 1.0, 0.9))
+		draw_circle(Vector2(-1, -31 + bob), 1, Color(1, 1, 1, 0.6))
+		# Glow
+		draw_circle(Vector2(0, -30 + bob), 7, Color(0.9, 0.9, 1.0, 0.12))
 
 	# Pickaxe drop indicator (floating icon above head)
 	if drops_pickaxe:

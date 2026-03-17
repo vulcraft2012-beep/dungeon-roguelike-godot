@@ -5,8 +5,8 @@ signal died
 
 @export var speed: float = 100.0
 @export var jump_force: float = -300.0
-@export var max_health: int = 5
-@export var attack_damage: int = 1
+@export var max_health: int = 100
+@export var attack_damage: int = 20
 @export var attack_cooldown: float = 0.22
 
 var health: int
@@ -36,6 +36,9 @@ var swing_index: int = 0
 var combo_reset_timer: float = 0.0
 var combo_reset_time: float = 0.5
 
+# Attack direction: 0 = horizontal, 1 = up, -1 = down
+var attack_direction: int = 0
+
 # Ledge grab
 var is_grabbing_ledge: bool = false
 var ledge_target_y: float = 0.0
@@ -52,7 +55,7 @@ var wall_jump_cooldown: float = 0.0
 # Heal ability (H key)
 var heal_charges: int = 3
 var max_heal_charges: int = 3
-var heal_amount: int = 1
+var heal_amount: int = 20
 
 # Blade upgrade (from chests)
 var has_blade: bool = false
@@ -64,9 +67,28 @@ var has_lockpick: bool = false
 var has_pickaxe: bool = false
 var using_pickaxe: bool = false  # Q to switch weapon
 
-# Ore mining progress
+# Ore mining progress (legacy, used for lockpick crafting)
 var ore_mined: int = 0
 var ore_needed: int = 6
+
+# New resource system
+var iron_ore: int = 0
+var gold_ore: int = 0
+var iron_ingot: int = 0
+var gold_ingot: int = 0
+var has_pearl: bool = false
+
+# Amulet (heals 1 HP every 10s)
+var has_amulet: bool = false
+var amulet_timer: float = 0.0
+var amulet_heal_interval: float = 10.0
+
+# Flask (from grate, heals 20 HP on F)
+var has_flask: bool = false
+var flask_charges: int = 0
+
+# Sword tier: 0=normal, 1=blade, 2=merged
+var sword_tier: int = 0
 
 var blade_cooldown: float = 0.12  # faster than normal 0.22
 
@@ -148,6 +170,13 @@ func _process(delta):
 		combo_reset_timer -= delta
 		if combo_reset_timer <= 0:
 			swing_index = 0
+
+	# Amulet passive heal
+	if has_amulet and health < max_health and not is_dead:
+		amulet_timer -= delta
+		if amulet_timer <= 0:
+			amulet_timer = amulet_heal_interval
+			heal(1)
 
 	# Ledge grab — just hang, wait for player input (handled in _physics_process)
 
@@ -255,7 +284,9 @@ func _physics_process(delta):
 			_check_ledge_grab()
 
 	var side = 1 if facing_right else -1
-	attack_shape.position.x = 15 * side
+	# Only update attack position when not attacking (attack sets its own position)
+	if not is_attacking:
+		attack_shape.position = Vector2(15 * side, -11)
 
 	move_and_slide()
 
@@ -333,12 +364,39 @@ func _unhandled_input(event):
 			heal_charges -= 1
 			heal(heal_amount)
 
+	# Flask on F
+	if event is InputEventKey and event.pressed and event.keycode == KEY_F:
+		if has_flask and flask_charges > 0 and health < max_health and not is_dead:
+			flask_charges -= 1
+			heal(20)
+
 func _do_attack():
 	is_attacking = true
 	can_attack = false
 	attack_timer = blade_cooldown if has_blade else attack_cooldown
 	attack_anim_timer = 0.12 if has_blade else 0.15
 	attack_shape.disabled = false
+
+	# Determine attack direction based on held keys
+	if Input.is_action_pressed("move_up"):
+		attack_direction = 1  # up
+	elif Input.is_action_pressed("move_down") and not is_on_floor():
+		attack_direction = -1  # down (only in air)
+	else:
+		attack_direction = 0  # horizontal
+
+	# Position attack hitbox based on direction
+	var side = 1 if facing_right else -1
+	match attack_direction:
+		1:  # up
+			attack_shape.position = Vector2(0, -28)
+			attack_shape.shape.size = Vector2(18, 22)
+		-1:  # down
+			attack_shape.position = Vector2(0, 6)
+			attack_shape.shape.size = Vector2(18, 22)
+		_:  # horizontal
+			attack_shape.position = Vector2(15 * side, -11)
+			attack_shape.shape.size = Vector2(22, 18)
 
 	combo_reset_timer = combo_reset_time
 
@@ -372,8 +430,20 @@ func _do_roll():
 
 func _on_attack_hit(body):
 	if body.has_method("take_damage") and is_attacking:
+		var dmg = attack_damage
+		# Pickaxe deals very low damage to monsters (incentivize switching)
+		if using_pickaxe:
+			dmg = max(5, dmg / 4)
+
 		var dir = 1.0 if body.global_position.x > global_position.x else -1.0
-		body.take_damage(attack_damage, Vector2(dir, -0.3).normalized())
+		var knockback = Vector2(dir, -0.3).normalized()
+		# Adjust knockback direction for vertical attacks
+		if attack_direction == 1:  # up
+			knockback = Vector2(dir * 0.3, -1.0).normalized()
+		elif attack_direction == -1:  # down
+			knockback = Vector2(dir * 0.3, 0.8).normalized()
+
+		body.take_damage(dmg, knockback)
 
 func take_damage(amount: int, knockback_dir: Vector2 = Vector2.ZERO):
 	if invincible or is_rolling or is_dead:
@@ -499,34 +569,54 @@ func _draw_sword(s: int):
 	if is_attacking:
 		var swing_progress = 1.0 - (attack_anim_timer / anim_dur)
 		var base = Vector2(s * 5, -12)
-		match swing_index:
-			0:
-				var angle = lerp(-0.6, 1.0, swing_progress) * s
-				var tip = base + Vector2(cos(angle) * blade_len, sin(angle) * 6)
-				var trail_angle = lerp(-0.6, 1.0, max(0, swing_progress - 0.3)) * s
-				var trail_tip = base + Vector2(cos(trail_angle) * (blade_len - 2), sin(trail_angle) * 6)
-				draw_line(trail_tip, tip, blade_trail, 3.0)
-				draw_line(base, tip, blade_col, 2.5)
-				draw_line(base + Vector2(0, -1), tip + Vector2(0, -1), blade_glow, 1.0)
-				draw_line(base + Vector2(0, -3), base + Vector2(0, 3), Color(0.6, 0.5, 0.2), 2.5)
-			1:
-				var angle = lerp(1.0, -0.6, swing_progress) * s
-				var tip = base + Vector2(cos(angle) * blade_len, sin(angle) * 6)
-				var trail_angle = lerp(1.0, -0.6, max(0, swing_progress - 0.3)) * s
-				var trail_tip = base + Vector2(cos(trail_angle) * (blade_len - 2), sin(trail_angle) * 6)
-				draw_line(trail_tip, tip, blade_trail, 3.0)
-				draw_line(base, tip, blade_col, 2.5)
-				draw_line(base + Vector2(0, -1), tip + Vector2(0, -1), blade_glow, 1.0)
-				draw_line(base + Vector2(0, -3), base + Vector2(0, 3), Color(0.6, 0.5, 0.2), 2.5)
-			2:
-				var angle = lerp(-1.2, 0.8, swing_progress) * s
-				var tip = base + Vector2(cos(angle) * (blade_len + 2) * s, sin(angle) * 18)
-				var trail_angle = lerp(-1.2, 0.8, max(0, swing_progress - 0.25)) * s
-				var trail_tip = base + Vector2(cos(trail_angle) * blade_len * s, sin(trail_angle) * 18)
-				draw_line(trail_tip, tip, Color(blade_trail.r, blade_trail.g, blade_trail.b, 0.25), 4.0)
-				draw_line(base, tip, blade_col, 3.0)
-				draw_line(base + Vector2(0, -1), tip + Vector2(0, -1), blade_glow, 1.5)
-				draw_line(base + Vector2(0, -3), base + Vector2(0, 3), Color(0.6, 0.5, 0.2), 2.5)
+
+		if attack_direction == 1:  # UP attack
+			var angle = lerp(-1.2, 0.2, swing_progress)
+			var tip = base + Vector2(sin(angle) * 6 * s, -cos(angle) * blade_len)
+			var trail_angle = lerp(-1.2, 0.2, max(0, swing_progress - 0.3))
+			var trail_tip = base + Vector2(sin(trail_angle) * 6 * s, -cos(trail_angle) * (blade_len - 2))
+			draw_line(trail_tip, tip, blade_trail, 3.0)
+			draw_line(base, tip, blade_col, 2.5)
+			draw_line(base + Vector2(-1, 0), tip + Vector2(-1, 0), blade_glow, 1.0)
+			draw_line(base + Vector2(-3, 0), base + Vector2(3, 0), Color(0.6, 0.5, 0.2), 2.5)
+		elif attack_direction == -1:  # DOWN attack
+			var angle = lerp(-0.2, 1.2, swing_progress)
+			var tip = base + Vector2(sin(angle) * 6 * s, cos(angle) * blade_len)
+			var trail_angle = lerp(-0.2, 1.2, max(0, swing_progress - 0.3))
+			var trail_tip = base + Vector2(sin(trail_angle) * 6 * s, cos(trail_angle) * (blade_len - 2))
+			draw_line(trail_tip, tip, blade_trail, 3.0)
+			draw_line(base, tip, blade_col, 2.5)
+			draw_line(base + Vector2(-1, 0), tip + Vector2(-1, 0), blade_glow, 1.0)
+			draw_line(base + Vector2(-3, 0), base + Vector2(3, 0), Color(0.6, 0.5, 0.2), 2.5)
+		else:  # Horizontal attacks (combo)
+			match swing_index:
+				0:
+					var angle = lerp(-0.6, 1.0, swing_progress) * s
+					var tip = base + Vector2(cos(angle) * blade_len, sin(angle) * 6)
+					var trail_angle = lerp(-0.6, 1.0, max(0, swing_progress - 0.3)) * s
+					var trail_tip = base + Vector2(cos(trail_angle) * (blade_len - 2), sin(trail_angle) * 6)
+					draw_line(trail_tip, tip, blade_trail, 3.0)
+					draw_line(base, tip, blade_col, 2.5)
+					draw_line(base + Vector2(0, -1), tip + Vector2(0, -1), blade_glow, 1.0)
+					draw_line(base + Vector2(0, -3), base + Vector2(0, 3), Color(0.6, 0.5, 0.2), 2.5)
+				1:
+					var angle = lerp(1.0, -0.6, swing_progress) * s
+					var tip = base + Vector2(cos(angle) * blade_len, sin(angle) * 6)
+					var trail_angle = lerp(1.0, -0.6, max(0, swing_progress - 0.3)) * s
+					var trail_tip = base + Vector2(cos(trail_angle) * (blade_len - 2), sin(trail_angle) * 6)
+					draw_line(trail_tip, tip, blade_trail, 3.0)
+					draw_line(base, tip, blade_col, 2.5)
+					draw_line(base + Vector2(0, -1), tip + Vector2(0, -1), blade_glow, 1.0)
+					draw_line(base + Vector2(0, -3), base + Vector2(0, 3), Color(0.6, 0.5, 0.2), 2.5)
+				2:
+					var angle = lerp(-1.2, 0.8, swing_progress) * s
+					var tip = base + Vector2(cos(angle) * (blade_len + 2) * s, sin(angle) * 18)
+					var trail_angle = lerp(-1.2, 0.8, max(0, swing_progress - 0.25)) * s
+					var trail_tip = base + Vector2(cos(trail_angle) * blade_len * s, sin(trail_angle) * 18)
+					draw_line(trail_tip, tip, Color(blade_trail.r, blade_trail.g, blade_trail.b, 0.25), 4.0)
+					draw_line(base, tip, blade_col, 3.0)
+					draw_line(base + Vector2(0, -1), tip + Vector2(0, -1), blade_glow, 1.5)
+					draw_line(base + Vector2(0, -3), base + Vector2(0, 3), Color(0.6, 0.5, 0.2), 2.5)
 	else:
 		var sx = s * 7
 		var idle_col = Color(0.5, 0.8, 0.95) if has_blade else Color(0.7, 0.7, 0.78)
@@ -537,18 +627,30 @@ func _draw_pickaxe(s: int):
 	if is_attacking:
 		var anim_dur = 0.15
 		var swing_progress = 1.0 - (attack_anim_timer / anim_dur)
-		var base = Vector2(s * 5, -12)
-		# Pickaxe swing arc
-		var angle = lerp(-0.8, 1.2, swing_progress) * s
-		var handle_end = base + Vector2(cos(angle) * 18, sin(angle) * 8)
+		var base = Vector2(s * 3, -12)
+
+		var angle: float
+		var handle_end: Vector2
+
+		if attack_direction == 1:  # UP attack
+			angle = lerp(0.5, -1.2, swing_progress)
+			handle_end = base + Vector2(sin(angle) * 5 * s, -cos(angle) * 18)
+		elif attack_direction == -1:  # DOWN attack
+			angle = lerp(-0.5, 1.2, swing_progress)
+			handle_end = base + Vector2(sin(angle) * 5 * s, cos(angle) * 18)
+		else:  # Horizontal
+			angle = lerp(-0.8, 1.2, swing_progress) * s
+			handle_end = base + Vector2(cos(angle) * 18, sin(angle) * 8)
+
 		# Handle (brown)
 		draw_line(base, handle_end, Color(0.55, 0.35, 0.15), 2.5)
 		# Pickaxe head (iron gray) - perpendicular to handle
-		var perp = Vector2(-sin(angle), cos(angle)) * s
+		var dir_vec = (handle_end - base).normalized()
+		var perp = Vector2(-dir_vec.y, dir_vec.x)
 		var head_pos = handle_end
 		draw_line(head_pos - perp * 5, head_pos + perp * 5, Color(0.6, 0.6, 0.65), 3.0)
 		# Point tip
-		draw_line(head_pos + perp * 5, head_pos + perp * 7 + Vector2(cos(angle) * 3, sin(angle) * 3), Color(0.7, 0.7, 0.75), 2.0)
+		draw_line(head_pos + perp * 5, head_pos + perp * 7 + dir_vec * 3, Color(0.7, 0.7, 0.75), 2.0)
 		# Sparks when mining
 		if swing_progress > 0.7:
 			draw_circle(handle_end + Vector2(randf_range(-3, 3), randf_range(-3, 3)), 1.5, Color(1, 0.8, 0.3, 0.6))

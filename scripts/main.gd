@@ -19,7 +19,7 @@ var darkness: CanvasModulate
 func _ready():
 	# Camera
 	camera = Camera2D.new()
-	camera.zoom = Vector2(1.5, 1.5)
+	camera.zoom = Vector2(1.8, 1.8)  # Closer zoom for Dead Cells feel
 	camera.position_smoothing_enabled = true
 	camera.position_smoothing_speed = 8.0
 	add_child(camera)
@@ -34,6 +34,7 @@ func _ready():
 	hud = CanvasLayer.new()
 	hud.set_script(hud_script)
 	add_child(hud)
+	hud.craft_recipe_selected.connect(_on_craft_recipe_selected)
 
 	# Game Over
 	var go_script = load("res://scripts/game_over.gd")
@@ -110,6 +111,11 @@ func _load_room():
 	current_room.room_cleared.connect(_on_room_cleared)
 	current_room.door_used.connect(_on_door_used)
 	current_room.challenge_complete.connect(_on_challenge_complete)
+	current_room.trial_completed.connect(_on_trial_completed)
+	if current_room.has_signal("craft_message"):
+		current_room.craft_message.connect(_on_craft_message)
+	if current_room.has_signal("open_craft_menu_request"):
+		current_room.open_craft_menu_request.connect(_on_open_craft_menu)
 
 	# Player starts in the start cave
 	var start_cave = null
@@ -126,21 +132,94 @@ func _load_room():
 	# Reset per-level items
 	player.has_lockpick = false
 	player.ore_mined = 0
-	# Keep pickaxe if already obtained, but reset on new game
+	# Keep pickaxe, resources, amulet, flask across levels
 	if current_room.challenge_type != "lockpick" and current_room.challenge_type != "crystal":
 		player.using_pickaxe = false
 
-	# Adjust darkness based on level
-	var dark_factor = max(0.08, 0.18 - current_level * 0.012)
-	darkness.color = Color(dark_factor + 0.05, dark_factor + 0.02, dark_factor)
+	# Adjust darkness based on level (never too dark — always playable)
+	var dark_factor = maxf(0.14, 0.22 - current_level * 0.006)
+	darkness.color = Color(dark_factor + 0.04, dark_factor + 0.02, dark_factor)
 
 	hud.update_level(current_level)
 	hud.update_enemies(current_room.enemies.size())
-	hud.show_message("Level " + str(current_level), 2.0)
+	if current_level == 5:
+		hud.show_message("BOSS: GOLEM", 3.0)
+	else:
+		hud.show_message("Level " + str(current_level), 2.0)
 
 func _process(_delta):
 	if current_room and not current_room.is_cleared:
 		hud.update_enemies(current_room.enemies.size())
+
+func _unhandled_input(event):
+	if event is InputEventKey and event.pressed:
+		# === DEBUG KEYS ===
+		# T = skip to next room instantly
+		if event.keycode == KEY_T:
+			current_level += 1
+			_load_room()
+			get_viewport().set_input_as_handled()
+		# Y = force door challenge + unlock
+		elif event.keycode == KEY_Y:
+			if current_room and current_room.doors.size() > 0:
+				var door = current_room.doors[0]
+				# Force room cleared
+				current_room.is_cleared = true
+				# Trigger challenge event based on type
+				match current_room.challenge_type:
+					"lockpick":
+						player.has_lockpick = true
+						pending_door = door
+						_start_crafting_then("lockpick")
+					"guardians":
+						if not current_room.challenge_started:
+							pending_door = door
+							current_room.start_guardian_challenge(enemy_scene)
+							hud.show_message("GUARDIANS SPAWNED!", 2.0)
+						elif not current_room.challenge_complete_flag:
+							# Kill remaining guardians
+							for g in current_room.door_guardians.duplicate():
+								if is_instance_valid(g):
+									g.queue_free()
+									current_room.door_guardians.erase(g)
+							current_room.challenge_complete_flag = true
+							current_room.challenge_complete.emit()
+						else:
+							pending_door = door
+							_complete_door()
+					"crystal":
+						if not current_room.challenge_started:
+							player.ore_mined = player.ore_needed
+							pending_door = door
+							_start_crafting_then("crystal")
+						elif not current_room.challenge_complete_flag:
+							# Kill crystal attackers
+							for a in current_room.crystal_attackers.duplicate():
+								if is_instance_valid(a):
+									a.queue_free()
+									current_room.crystal_attackers.erase(a)
+							current_room.challenge_complete_flag = true
+							current_room.challenge_complete.emit()
+						else:
+							pending_door = door
+							_complete_door()
+				get_viewport().set_input_as_handled()
+
+func _on_open_craft_menu(station_type: String):
+	if hud.is_menu_open():
+		return
+	hud.open_craft_menu(station_type)
+	player.is_dead = true  # Freeze player while menu open
+
+func _on_craft_recipe_selected(station_type: String, recipe_index: int):
+	if not current_room or not player:
+		return
+	var result = current_room.try_craft_recipe(station_type, recipe_index)
+	if result != "":
+		hud.show_message(result, 2.0)
+
+func _on_craft_message(text: String):
+	hud.show_message(text, 2.0)
 
 func _on_room_cleared():
 	hud.update_enemies(0)
@@ -151,6 +230,12 @@ func _on_door_used(door):
 		hud.show_message("Kill all enemies first!", 2.0)
 		return
 
+	# Boss room — door opens directly after defeating golem
+	if current_room.is_boss_room:
+		pending_door = door
+		_complete_door()
+		return
+
 	pending_door = door
 
 	match current_room.challenge_type:
@@ -159,8 +244,8 @@ func _on_door_used(door):
 				hud.show_message("Find the pickaxe! Mine 6 ore to craft a lockpick!", 3.0)
 				pending_door = null
 				return
-			var diff = current_room.get_lockpick_difficulty()
-			lockpick_ui.start_lockpick(diff)
+			# Show crafting animation then start lockpick
+			_start_crafting_then("lockpick")
 		"guardians":
 			if current_room.challenge_complete_flag:
 				_complete_door()
@@ -177,10 +262,18 @@ func _on_door_used(door):
 					hud.show_message("Mine 6 ore to craft the crystal!", 3.0)
 					pending_door = null
 					return
-				current_room.start_crystal_placement()
-				hud.show_message("CRYSTAL PLACED! DEFEND IT!", 3.0)
+				# Show crafting animation then place crystal
+				_start_crafting_then("crystal")
 			else:
 				hud.show_message("Defend the crystal!", 2.0)
+
+func _on_trial_completed():
+	# Reward: +50% max health
+	var bonus = player.max_health / 2
+	player.max_health += bonus
+	player.heal(bonus)
+	hud.update_health(player.health, player.max_health)
+	hud.show_message("TRIAL COMPLETE! Max HP +" + str(bonus) + "!", 3.0)
 
 func _on_challenge_complete():
 	hud.show_message("Challenge Complete!", 2.0)
@@ -196,10 +289,24 @@ func _complete_door():
 		pending_door.unlock()
 		pending_door = null
 		hud.show_message("Door Unlocked!", 1.5)
-		player.heal(1)
+		player.heal(20)
+		player.heal_charges = player.max_heal_charges  # Restore heals on new level
 		await get_tree().create_timer(1.0).timeout
 		current_level += 1
 		_load_room()
+
+func _start_crafting_then(item: String):
+	hud.start_crafting(item)
+	# Freeze player during crafting
+	player.is_dead = true  # Reuse dead flag to prevent input
+	await hud.crafting_done
+	player.is_dead = false
+	if item == "lockpick":
+		var diff = current_room.get_lockpick_difficulty()
+		lockpick_ui.start_lockpick(diff)
+	elif item == "crystal":
+		current_room.start_crystal_placement()
+		hud.show_message("CRYSTAL PLACED! DEFEND IT!", 3.0)
 
 func _on_lockpick_success():
 	_complete_door()
