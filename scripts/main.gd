@@ -142,7 +142,9 @@ func _load_room():
 
 	hud.update_level(current_level)
 	hud.update_enemies(current_room.enemies.size())
-	if current_level == 5:
+	if current_level == 1:
+		hud.show_controls = true
+	elif current_level == 5:
 		hud.show_message("BOSS: GOLEM", 3.0)
 	else:
 		hud.show_message("Level " + str(current_level), 2.0)

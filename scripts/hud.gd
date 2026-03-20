@@ -7,6 +7,10 @@ var enemies_remaining: int = 0
 var message_text: String = ""
 var message_timer: float = 0.0
 
+# Controls tutorial (level 1 only)
+var show_controls: bool = false
+var controls_alpha: float = 1.0
+
 # Crafting animation
 var is_crafting: bool = false
 var craft_timer: float = 0.0
@@ -114,6 +118,11 @@ func _get_recipes(station: String, player) -> Array:
 	return recipes
 
 func _unhandled_input(event):
+	if show_controls and event is InputEventKey and event.pressed and event.keycode == KEY_ENTER:
+		show_controls = false
+		get_viewport().set_input_as_handled()
+		return
+
 	if not craft_menu_open:
 		return
 
@@ -449,6 +458,10 @@ func _on_draw():
 	if craft_menu_open:
 		_draw_craft_menu(screen_size)
 
+	# Controls tutorial overlay
+	if show_controls:
+		_draw_controls(screen_size)
+
 	# Message
 	if message_text != "":
 		var msg_alpha = min(message_timer, 1.0)
@@ -456,6 +469,55 @@ func _on_draw():
 			Vector2(320 - message_text.length() * 3, 60),
 			message_text, HORIZONTAL_ALIGNMENT_CENTER, -1, 14,
 			Color(1, 1, 0.5, msg_alpha))
+
+func _draw_controls(screen_size: Vector2):
+	# Semi-transparent overlay
+	draw_node.draw_rect(Rect2(0, 0, screen_size.x, screen_size.y), Color(0, 0, 0, 0.35))
+
+	var cx = screen_size.x / 2
+	var cy = screen_size.y / 2
+	var box_w = 320.0
+	var box_h = 290.0
+	var bx = cx - box_w / 2
+	var by = cy - box_h / 2
+
+	# Panel background
+	draw_node.draw_rect(Rect2(bx, by, box_w, box_h), Color(0.08, 0.08, 0.12, 0.95))
+	draw_node.draw_rect(Rect2(bx + 1, by + 1, box_w - 2, box_h - 2), Color(0.4, 0.35, 0.2, 0.4), false, 2.0)
+
+	var font = ThemeDB.fallback_font
+	var y = by + 28
+	var col_key = Color(1, 0.85, 0.4)
+	var col_txt = Color(0.85, 0.85, 0.9)
+	var col_title = Color(1, 0.7, 0.2)
+	var sz = 11
+	var gap = 22
+
+	draw_node.draw_string(font, Vector2(cx - 50, y), "CONTROLS", HORIZONTAL_ALIGNMENT_CENTER, -1, 14, col_title)
+	y += gap + 8
+
+	var controls = [
+		["WASD", "Move"],
+		["Space", "Jump / Wall Jump"],
+		["LMB", "Attack"],
+		["S + LMB", "Attack Down"],
+		["W + LMB", "Attack Up"],
+		["RMB", "Shield"],
+		["Shift", "Dodge Roll"],
+		["S", "Drop Through Platform"],
+		["W", "Climb Ladder"],
+		["E", "Interact with Door"],
+		["H", "Heal"],
+	]
+
+	for c in controls:
+		draw_node.draw_string(font, Vector2(bx + 15, y), c[0], HORIZONTAL_ALIGNMENT_LEFT, -1, sz, col_key)
+		draw_node.draw_string(font, Vector2(bx + 110, y), c[1], HORIZONTAL_ALIGNMENT_LEFT, -1, sz, col_txt)
+		y += gap
+
+	y += 6
+	var pulse = sin(Time.get_ticks_msec() * 0.004) * 0.3 + 0.7
+	draw_node.draw_string(font, Vector2(cx - 60, y), "[Enter] Continue", HORIZONTAL_ALIGNMENT_CENTER, -1, 12, Color(1, 1, 0.6, pulse))
 
 func _draw_craft_menu(screen_size: Vector2):
 	var player = _get_player()
