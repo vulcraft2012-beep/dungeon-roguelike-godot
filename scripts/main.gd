@@ -226,10 +226,6 @@ func _on_room_cleared():
 	hud.show_message("Room Cleared! Find the door!", 3.0)
 
 func _on_door_used(door):
-	if not current_room.is_cleared:
-		hud.show_message("Kill all enemies first!", 2.0)
-		return
-
 	# Boss room — door opens directly after defeating golem
 	if current_room.is_boss_room:
 		pending_door = door

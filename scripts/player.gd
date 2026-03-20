@@ -52,6 +52,13 @@ var wall_jump_force: Vector2 = Vector2(180, -280)
 var wall_dir: int = 0  # -1 left wall, 1 right wall, 0 none
 var wall_jump_cooldown: float = 0.0
 
+# Ladder climbing
+var is_on_vine: bool = false
+var vine_climb_speed: float = 80.0
+
+# Drop through one-way platforms
+var drop_through_timer: float = 0.0
+
 # Heal ability (H key)
 var heal_charges: int = 3
 var max_heal_charges: int = 3
@@ -98,7 +105,7 @@ var body_collision: CollisionShape2D
 
 func _ready():
 	health = max_health
-	normal_collision_mask = 4 | 8  # walls + doors
+	normal_collision_mask = 4 | 8 | 32  # walls + doors + one-way platforms
 
 	body_collision = CollisionShape2D.new()
 	var rect = RectangleShape2D.new()
@@ -182,6 +189,15 @@ func _process(delta):
 
 	queue_redraw()
 
+func _find_room() -> Node2D:
+	# Room is a sibling node (child of main.gd), not our parent
+	var parent = get_parent()
+	if parent:
+		for child in parent.get_children():
+			if child != self and child.has_method("get_ladder_at"):
+				return child
+	return null
+
 func _physics_process(delta):
 	if is_dead:
 		return
@@ -215,7 +231,50 @@ func _physics_process(delta):
 			position.y = lerp(position.y, ledge_target_y - 12, delta * 12)
 		return
 
-	velocity.y += gravity * delta
+	# Ladder climbing — find the room node (sibling, not parent)
+	var was_on_vine = is_on_vine
+	is_on_vine = false
+	var room = _find_room()
+	if room:
+		var lad = room.get_ladder_at(global_position.x, global_position.y)
+		if not lad.is_empty():
+			# W = grab ladder instantly
+			if Input.is_action_pressed("move_up") or Input.is_action_pressed("move_down") or was_on_vine:
+				is_on_vine = true
+				velocity.y = 0
+				velocity.x = 0
+				if Input.is_action_pressed("move_up"):
+					velocity.y = -vine_climb_speed
+				elif Input.is_action_pressed("move_down"):
+					velocity.y = vine_climb_speed
+				# Snap to ladder center
+				global_position.x = lerpf(global_position.x, lad.x, delta * 15)
+				# Jump off
+				if Input.is_action_just_pressed("jump"):
+					is_on_vine = false
+					velocity.y = jump_force * 0.8
+				# Left/Right exits ladder
+				if Input.is_action_pressed("move_left") or Input.is_action_pressed("move_right"):
+					if not Input.is_action_pressed("move_up") and not Input.is_action_pressed("move_down"):
+						is_on_vine = false
+				# Reached floor
+				if is_on_floor() and not Input.is_action_pressed("move_down"):
+					is_on_vine = false
+
+	if not is_on_vine:
+		velocity.y += gravity * delta
+
+	# Drop through one-way platforms on S
+	if drop_through_timer > 0:
+		drop_through_timer -= delta
+		if drop_through_timer <= 0:
+			drop_through_timer = 0
+			set_collision_mask_value(6, true)
+	elif is_on_floor() and Input.is_action_just_pressed("move_down") and not is_on_vine:
+		drop_through_timer = 0.18
+		velocity.y = 50
+		position.y += 4
+		set_collision_mask_value(6, false)
 
 	if is_rolling:
 		velocity.x = roll_direction * roll_speed
@@ -295,17 +354,19 @@ func _check_ledge_grab():
 	var space = get_world_2d().direct_space_state
 
 	var check_x = global_position.x + side * 10
+	var wall_and_plat_mask = 4 | 32  # walls + one-way platforms
 
 	# Ray downward from ahead to find platform top
 	var feet_from = Vector2(check_x, global_position.y - 20)
 	var feet_to = Vector2(check_x, global_position.y + 5)
-	var q1 = PhysicsRayQueryParameters2D.create(feet_from, feet_to, 4)
+	var q1 = PhysicsRayQueryParameters2D.create(feet_from, feet_to, wall_and_plat_mask)
 	var r1 = space.intersect_ray(q1)
 
 	if r1.is_empty():
 		return
 
 	var platform_y = r1.position.y
+	var is_oneway = (r1.collider.collision_layer & 32) != 0
 
 	var diff = global_position.y - platform_y
 	if diff < -5 or diff > 25:
@@ -314,23 +375,23 @@ func _check_ledge_grab():
 	if platform_y < 35:
 		return
 
-	# Headroom check
-	var head_from = Vector2(check_x, platform_y - 5)
-	var head_to = Vector2(check_x, platform_y - 28)
-	var q2 = PhysicsRayQueryParameters2D.create(head_from, head_to, 4)
-	var r2 = space.intersect_ray(q2)
+	# Headroom check — only for solid walls, not one-way platforms
+	if not is_oneway:
+		var head_from = Vector2(check_x, platform_y - 5)
+		var head_to = Vector2(check_x, platform_y - 28)
+		var q2 = PhysicsRayQueryParameters2D.create(head_from, head_to, 4)
+		var r2 = space.intersect_ray(q2)
+		if not r2.is_empty():
+			return
 
-	if not r2.is_empty():
-		return
-
-	# Edge check - no platform directly below us
-	var above_from = Vector2(global_position.x, platform_y - 5)
-	var above_to = Vector2(global_position.x, platform_y + 5)
-	var q3 = PhysicsRayQueryParameters2D.create(above_from, above_to, 4)
-	var r3 = space.intersect_ray(q3)
-
-	if not r3.is_empty() and abs(r3.position.y - platform_y) < 4:
-		return
+	# Edge check - skip for one-way platforms
+	if not is_oneway:
+		var above_from = Vector2(global_position.x, platform_y - 5)
+		var above_to = Vector2(global_position.x, platform_y + 5)
+		var q3 = PhysicsRayQueryParameters2D.create(above_from, above_to, 4)
+		var r3 = space.intersect_ray(q3)
+		if not r3.is_empty() and abs(r3.position.y - platform_y) < 4:
+			return
 
 	is_grabbing_ledge = true
 	ledge_target_y = platform_y
@@ -380,8 +441,8 @@ func _do_attack():
 	# Determine attack direction based on held keys
 	if Input.is_action_pressed("move_up"):
 		attack_direction = 1  # up
-	elif Input.is_action_pressed("move_down") and not is_on_floor():
-		attack_direction = -1  # down (only in air)
+	elif Input.is_action_pressed("move_down"):
+		attack_direction = -1  # down
 	else:
 		attack_direction = 0  # horizontal
 
@@ -412,7 +473,7 @@ func _do_roll():
 	invincible = true
 
 	collision_layer = 0
-	collision_mask = 4
+	collision_mask = 4 | 32  # walls + one-way platforms
 
 	# Shrink collision to 1 tile height (16px) so player can roll through gaps
 	body_collision.shape.size = Vector2(10, 10)
@@ -509,6 +570,29 @@ func _draw():
 		# Friction sparks
 		if fmod(Time.get_ticks_msec(), 200.0) < 100:
 			draw_circle(Vector2(-s * 4, -6), 1.5, Color(1, 0.8, 0.3, 0.4))
+		return
+
+	# Ladder climbing animation
+	if is_on_vine:
+		var climb_anim = sin(Time.get_ticks_msec() * 0.008) * 3
+		# Body (facing forward on ladder)
+		draw_rect(Rect2(-5, -18, 10, 14), Color(0.35, 0.35, 0.4))
+		draw_rect(Rect2(-4, -17, 8, 8), Color(0.42, 0.42, 0.48))
+		# Head
+		draw_rect(Rect2(-4, -24, 8, 7), Color(0.9, 0.75, 0.55))
+		draw_rect(Rect2(-5, -26, 10, 5), Color(0.5, 0.5, 0.55))
+		# Eyes
+		draw_rect(Rect2(-2, -23, 2, 1), Color(0.35, 0.65, 0.95))
+		draw_rect(Rect2(1, -23, 2, 1), Color(0.35, 0.65, 0.95))
+		# Arms gripping ladder rungs (alternating reach)
+		draw_rect(Rect2(-7, -18 + climb_anim, 3, 2), Color(0.9, 0.75, 0.55))
+		draw_rect(Rect2(5, -14 - climb_anim, 3, 2), Color(0.9, 0.75, 0.55))
+		# Legs on rungs
+		draw_rect(Rect2(-4, -4 + climb_anim, 3, 5), Color(0.25, 0.2, 0.15))
+		draw_rect(Rect2(2, -4 - climb_anim, 3, 5), Color(0.25, 0.2, 0.15))
+		# Boots
+		draw_rect(Rect2(-5, 0 + climb_anim, 4, 2), Color(0.3, 0.22, 0.12))
+		draw_rect(Rect2(2, 0 - climb_anim, 4, 2), Color(0.3, 0.22, 0.12))
 		return
 
 	# Ledge grab animation

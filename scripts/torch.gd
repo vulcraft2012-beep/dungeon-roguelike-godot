@@ -13,9 +13,7 @@ func _ready():
 	light.energy = base_energy
 	light.texture = _create_light_texture()
 	light.texture_scale = 2.5
-	light.shadow_enabled = true
-	light.shadow_filter = PointLight2D.SHADOW_FILTER_PCF5
-	light.shadow_filter_smooth = 2.0
+	light.shadow_enabled = false  # Shadows are too expensive on large maps
 	add_child(light)
 
 	flicker_offset = randf() * 100.0
@@ -41,7 +39,9 @@ func _process(delta):
 	light.energy = base_energy + flicker
 	light.texture_scale = 2.5 + flicker * 0.3
 
-	queue_redraw()
+	# Redraw flame animation every 3rd frame to save performance
+	if Engine.get_process_frames() % 3 == 0:
+		queue_redraw()
 
 func _draw():
 	var s = 1 if on_wall_right else -1

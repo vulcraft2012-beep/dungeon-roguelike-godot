@@ -18,6 +18,8 @@ var lava_y: float = 0.0  # Y position of lava surface in boss room
 var tile_size: int = 16
 var grid_cols: int = 0
 var grid_rows: int = 0
+var _last_cam_tile_x: int = -1
+var _last_cam_tile_y: int = -1
 var grid: Array = []  # 2D array: 1 = solid rock, 0 = open/air
 
 var floor_y: float
@@ -79,6 +81,8 @@ var challenge_type: String = "lockpick"
 var challenge_started: bool = false
 var challenge_complete_flag: bool = false
 var reachable_set: Dictionary = {}  # Tiles reachable from start (for spawn validation)
+var ladders: Array = []  # [{x, y_top, y_bottom, col}] — climbable ladders
+var oneway_platforms: Array = []  # [{x, y, w}] — thin platforms, jump through from below
 var door_guardians: Array = []
 var crystal_node: Node2D = null
 var crystal_attackers: Array = []
@@ -125,7 +129,7 @@ func setup(level: int, enemy_scene: PackedScene, p_player_ref: CharacterBody2D):
 	portal_spawn_interval = max(5.0, 10.0 - room_level * 0.5)
 
 func _setup_boss_room():
-	# Compact arena for golem boss fight — platforms close enough to jump between
+	# Boss arena: HUGE golem in center, 6 platforms around him over lava
 	rock_color = Color(0.5, 0.3, 0.2)
 	rock_dark = Color(0.35, 0.2, 0.12)
 	rock_light = Color(0.65, 0.4, 0.25)
@@ -142,24 +146,39 @@ func _setup_boss_room():
 			row.append(0)
 		grid.append(row)
 
-	# Solid borders (walls + ceiling)
+	# Solid borders
 	for r in grid_rows:
 		for c in grid_cols:
 			if r < 3 or r >= grid_rows - 1 or c < 2 or c >= grid_cols - 2:
 				grid[r][c] = 1
 
-	# Compact platform layout (centered, gaps ~4-5 tiles = jumpable)
-	#        [P3]          row-18 (top center)
-	#    [P2]    [P4]      row-14 (mid sides)
-	#      [P1][P5]        row-10 (bottom, close together)
+	# Center of room (tile coords)
+	var center_c = grid_cols / 2  # ~37
+	var center_r = grid_rows / 2 + 2  # ~24 (slightly below center)
+
+	# Central pillar for golem (wide, thick)
+	for dc in range(-3, 4):
+		for dr in range(-1, 3):
+			var nc = center_c + dc
+			var nr = center_r + dr
+			if nc >= 0 and nc < grid_cols and nr >= 0 and nr < grid_rows:
+				grid[nr][nc] = 1
+
+	# 6 platforms surrounding the golem
+	#       [P1]                 (top, above golem)
+	#  [P6]      [P2]           (upper sides)
+	#      {GOLEM}               (center)
+	#  [P5]      [P3]           (lower sides)
+	#       [P4]                 (bottom, player start)
 	#     ===LAVA===
 
 	var plat_data = [
-		{"r": grid_rows - 10, "c": 24, "w": 12},  # P1 - bottom left (player start)
-		{"r": grid_rows - 14, "c": 20, "w": 12},  # P2 - mid left
-		{"r": grid_rows - 18, "c": 29, "w": 14},  # P3 - top center (wide)
-		{"r": grid_rows - 14, "c": 40, "w": 12},  # P4 - mid right
-		{"r": grid_rows - 10, "c": 38, "w": 12},  # P5 - bottom right (golem)
+		{"r": center_r - 12, "c": center_c - 6, "w": 12},  # P1 top center
+		{"r": center_r - 7,  "c": center_c + 10, "w": 10}, # P2 upper right
+		{"r": center_r + 5,  "c": center_c + 10, "w": 10}, # P3 lower right
+		{"r": center_r + 10, "c": center_c - 6, "w": 12},  # P4 bottom center (start)
+		{"r": center_r + 5,  "c": center_c - 19, "w": 10}, # P5 lower left
+		{"r": center_r - 7,  "c": center_c - 19, "w": 10}, # P6 upper left
 	]
 
 	for pd in plat_data:
@@ -167,64 +186,58 @@ func _setup_boss_room():
 			var nc = pd.c + dc
 			if nc >= 0 and nc < grid_cols:
 				grid[pd.r][nc] = 1
-		# Add thickness (2 tiles)
+		# Thickness
 		for dc in pd.w:
 			var nc = pd.c + dc
 			if nc >= 0 and nc < grid_cols and pd.r + 1 < grid_rows:
 				grid[pd.r + 1][nc] = 1
 
-	# Small stepping stones between platforms for easier navigation
-	# Between P1 and P5 (bridge)
-	for dc in 4:
-		var nc = 35 + dc
-		if nc < grid_cols:
-			grid[grid_rows - 10][nc] = 1
-			grid[grid_rows - 9][nc] = 1
-	# Step between P2 and P3
+	# Stepping stones between platforms (small 3-tile bridges)
+	# P4→P5 (bottom to lower-left)
 	for dc in 3:
-		var nc = 27 + dc
-		if nc < grid_cols:
-			grid[grid_rows - 16][nc] = 1
-	# Step between P3 and P4
+		grid[center_r + 8][center_c - 10 + dc] = 1
+	# P4→P3 (bottom to lower-right)
 	for dc in 3:
-		var nc = 38 + dc
-		if nc < grid_cols:
-			grid[grid_rows - 16][nc] = 1
+		grid[center_r + 8][center_c + 8 + dc] = 1
+	# P6→P1 (upper-left to top)
+	for dc in 3:
+		grid[center_r - 10][center_c - 8 + dc] = 1
+	# P1→P2 (top to upper-right)
+	for dc in 3:
+		grid[center_r - 10][center_c + 7 + dc] = 1
 
-	# Lava floor (solid for collision but drawn as lava)
+	# Lava floor
 	var lava_row = grid_rows - 4
 	for c in grid_cols:
 		for r in range(lava_row, grid_rows):
 			grid[r][c] = 1
 
-	# Build collision
 	_build_collision()
 
-	# Caves array for compatibility
+	# Player start cave (P4 = bottom platform)
 	caves.append({
-		"x": float(plat_data[0].c * tile_size + plat_data[0].w * tile_size / 2),
-		"y": float((plat_data[0].r - 2) * tile_size),
+		"x": float(plat_data[3].c * tile_size + plat_data[3].w * tile_size / 2),
+		"y": float((plat_data[3].r - 2) * tile_size),
 		"w": 160.0, "h": 32.0,
 		"type": "start",
-		"floor_y": float(plat_data[0].r * tile_size)
+		"floor_y": float(plat_data[3].r * tile_size)
 	})
 
-	# Spawn golem on platform 5
+	# Spawn HUGE golem in CENTER on the central pillar
 	golem_boss = CharacterBody2D.new()
 	golem_boss.set_script(golem_script)
 	golem_boss.position = Vector2(
-		(plat_data[4].c + plat_data[4].w / 2) * tile_size,
-		plat_data[4].r * tile_size - 1
+		center_c * tile_size,
+		center_r * tile_size - 1
 	)
 	golem_boss.setup(player_ref)
 	golem_boss.golem_defeated.connect(_on_golem_defeated)
 	add_child(golem_boss)
 
-	# No normal enemies, no door
 	is_cleared = false
 
-	# Add torches on platforms
-	for pd in [plat_data[0], plat_data[2], plat_data[4]]:
+	# Torches on some platforms
+	for pd in [plat_data[0], plat_data[3], plat_data[2], plat_data[5]]:
 		var torch = Node2D.new()
 		torch.set_script(torch_script)
 		var tx = (pd.c + pd.w / 2) * tile_size
@@ -291,277 +304,292 @@ func _generate_cave():
 	caves.clear()
 	platforms.clear()
 	chests.clear()
+	ladders.clear()
+	oneway_platforms.clear()
 
-	# Initialize grid - all solid
+	# Initialize grid — all solid
 	for r in grid_rows:
 		var row = []
 		for c in grid_cols:
 			row.append(1)
 		grid.append(row)
 
-	# Random fill - carve out open spaces
-	# Large map = slightly lower fill for more open areas
-	var fill_rate = 0.45 + room_level * 0.005
-	fill_rate = minf(fill_rate, 0.54)
-	for r in range(4, grid_rows - 4):
-		for c in range(4, grid_cols - 4):
-			if randf() > fill_rate:
-				grid[r][c] = 0
+	# === ROOM-GRID like the reference image ===
+	# Dense rooms with platforms, wall ledges, pillars
+	var rooms_x = 6
+	var rooms_y = 5
+	var cell_w = (grid_cols - 6) / rooms_x   # ~32 tiles
+	var cell_h = (grid_rows - 6) / rooms_y   # ~16 tiles
+	var wall_t = 2
+	var room_data: Array = []
 
-	# Cellular automata smoothing (5 iterations for smoother large caves)
-	for iteration in 5:
-		var new_grid = []
-		for r in grid_rows:
-			var row = []
-			for c in grid_cols:
-				row.append(grid[r][c])
-			new_grid.append(row)
+	# Create rooms — NOT all rooms are carved (some stay solid = variety)
+	var room_active: Array = []  # which rooms exist
+	for ry in rooms_y:
+		for rx in rooms_x:
+			# 80% chance room exists, always for start corner + edges
+			var active = randf() < 0.80
+			if (ry == rooms_y - 1 and rx == 0):
+				active = true  # start
+			# Always active on edges for connectivity
+			if ry == 0 or ry == rooms_y - 1 or rx == 0 or rx == rooms_x - 1:
+				active = true
+			room_active.append(active)
 
-		for r in range(1, grid_rows - 1):
-			for c in range(1, grid_cols - 1):
-				var neighbors = _count_neighbors(r, c)
-				if neighbors >= 5:
-					new_grid[r][c] = 1
-				elif neighbors <= 3:
-					new_grid[r][c] = 0
+			var c_left = 3 + rx * cell_w + wall_t
+			var c_right = 3 + (rx + 1) * cell_w - wall_t
+			var r_top = 3 + ry * cell_h + wall_t
+			var r_bot = 3 + (ry + 1) * cell_h - wall_t
 
-		grid = new_grid
+			if active:
+				for r in range(r_top, r_bot + 1):
+					for c in range(c_left, c_right + 1):
+						if r >= 0 and r < grid_rows and c >= 0 and c < grid_cols:
+							grid[r][c] = 0
 
-	# Ensure borders are solid (4 tiles thick for large map)
-	for r in grid_rows:
-		for c in grid_cols:
-			if r < 4 or r >= grid_rows - 4 or c < 4 or c >= grid_cols - 4:
-				grid[r][c] = 1
+			room_data.append({
+				"rx": rx, "ry": ry,
+				"r_top": r_top, "r_bot": r_bot,
+				"c_left": c_left, "c_right": c_right,
+				"active": active,
+			})
 
-	# === CARVE KEY AREAS (spread across the large map) ===
+	# Add floor at bottom of each active room
+	for rd in room_data:
+		if not rd.active:
+			continue
+		for c in range(rd.c_left - 1, rd.c_right + 2):
+			if c >= 0 and c < grid_cols and rd.r_bot + 1 < grid_rows:
+				grid[rd.r_bot + 1][c] = 1
 
-	# Start area (bottom-left)
-	var start_r = grid_rows - 9
-	var start_c = 7
-	_carve_room(start_r, start_c, 7, 4)
-	_make_floor(start_r + 4, start_c - 1, 9)
+	# === BUILD FIXED START ROOM (bottom-left) ===
+	var start_room_idx = (rooms_y - 1) * rooms_x + 0
+	_build_start_room(room_data[start_room_idx])
 
+	# === FILL ROOMS with content ===
+	for i_rd in room_data.size():
+		if i_rd == start_room_idx:
+			continue  # start room has fixed layout
+		var rd = room_data[i_rd]
+		if not rd.active:
+			continue
+		var rw = rd.c_right - rd.c_left
+		var rh = rd.r_bot - rd.r_top
+
+		# --- Wall ledges (solid blocks sticking out from walls) ---
+		var num_ledges = randi_range(2, 4)
+		for _l in num_ledges:
+			var from_left = randf() < 0.5
+			var ledge_r = randi_range(rd.r_top + 3, rd.r_bot - 2)
+			var ledge_w = randi_range(3, mini(8, rw / 3))
+			var lc = rd.c_left if from_left else rd.c_right - ledge_w + 1
+			for dc in range(ledge_w):
+				var nc = lc + dc
+				if nc >= rd.c_left and nc <= rd.c_right:
+					grid[ledge_r][nc] = 1
+					# Thickness below
+					if ledge_r + 1 <= rd.r_bot:
+						grid[ledge_r + 1][nc] = 1
+
+		# --- Pillars (1-2 tile wide columns from floor) ---
+		if rw > 15:
+			var num_pillars = randi_range(1, 2)
+			for _p in num_pillars:
+				var pc = randi_range(rd.c_left + 4, rd.c_right - 4)
+				var pillar_h = randi_range(3, mini(6, rh - 3))
+				for dr in range(pillar_h):
+					var pr = rd.r_bot - dr
+					if pr >= rd.r_top + 2:
+						grid[pr][pc] = 1
+						if pc + 1 <= rd.c_right:
+							grid[pr][pc + 1] = 1
+
+		# --- One-way platforms at different heights ---
+		var num_plats = randi_range(2, 5)
+		var used_rows: Array = []
+		for _p in num_plats:
+			var pr = randi_range(rd.r_top + 2, rd.r_bot - 2)
+			# Don't stack platforms too close
+			var too_close = false
+			for ur in used_rows:
+				if abs(pr - ur) < 3:
+					too_close = true
+					break
+			if too_close:
+				continue
+			used_rows.append(pr)
+
+			var pw = randi_range(4, mini(14, rw - 6))
+			var pc = randi_range(rd.c_left + 1, rd.c_right - pw)
+			# Check not overlapping a ladder
+			var blocked = false
+			for lad in ladders:
+				if lad.col >= pc and lad.col <= pc + pw:
+					blocked = true
+					break
+			if blocked:
+				continue
+			oneway_platforms.append({
+				"x": float(pc * tile_size),
+				"y": float(pr * tile_size),
+				"w": float(pw * tile_size),
+				"r": pr, "c": pc, "tw": pw,
+			})
+
+		# --- Ceiling stalactite blocks (hanging from ceiling) ---
+		if rh > 8:
+			var num_hang = randi_range(1, 3)
+			for _h in num_hang:
+				var hc = randi_range(rd.c_left + 2, rd.c_right - 3)
+				var hang_h = randi_range(2, 4)
+				for dr in range(hang_h):
+					var hr = rd.r_top + dr
+					if hr < rd.r_bot - 4:
+						grid[hr][hc] = 1
+						if hc + 1 <= rd.c_right:
+							grid[hr][hc + 1] = 1
+
+	# === CONNECT ROOMS horizontally ===
+	for idx in room_data.size():
+		var rd = room_data[idx]
+		if not rd.active:
+			continue
+		var rx = rd.rx
+		var ry = rd.ry
+		if rx < rooms_x - 1:
+			var right_idx = ry * rooms_x + rx + 1
+			if not room_data[right_idx].active:
+				continue
+			if randf() < 0.85 or ry == rooms_y - 1 or ry == 0:
+				var right_rd = room_data[right_idx]
+				var open_r = rd.r_bot - randi_range(0, 1)
+				var open_h = randi_range(4, 5)
+				var wall_c_start = rd.c_right + 1
+				var wall_c_end = right_rd.c_left - 1
+				for r in range(open_r - open_h, open_r + 1):
+					for c in range(wall_c_start, wall_c_end + 1):
+						if r >= 0 and r < grid_rows and c >= 0 and c < grid_cols:
+							grid[r][c] = 0
+				for c in range(wall_c_start, wall_c_end + 1):
+					if open_r + 1 < grid_rows and c >= 0 and c < grid_cols:
+						grid[open_r + 1][c] = 1
+
+	# === CONNECT ROOMS vertically (with ladders) ===
+	for idx in room_data.size():
+		var rd = room_data[idx]
+		if not rd.active:
+			continue
+		var rx = rd.rx
+		var ry = rd.ry
+		if ry < rooms_y - 1:
+			var below_idx = (ry + 1) * rooms_x + rx
+			if not room_data[below_idx].active:
+				continue
+			if randf() < 0.65 or rx == 0 or rx == rooms_x - 1:
+				var below_rd = room_data[below_idx]
+				var open_c = randi_range(rd.c_left + 2, maxi(rd.c_left + 3, rd.c_right - 5))
+				var open_w = randi_range(3, 4)
+				# Open floor/ceiling
+				for c in range(open_c, open_c + open_w):
+					for r in range(rd.r_bot, below_rd.r_top + 1):
+						if r >= 0 and r < grid_rows and c >= 0 and c < grid_cols:
+							grid[r][c] = 0
+				# Ladder right at the opening
+				var ladder_c = open_c + open_w / 2
+				ladders.append({
+					"x": float(ladder_c * tile_size + tile_size / 2),
+					"y_top": float((rd.r_bot - 3) * tile_size),
+					"y_bottom": float((below_rd.r_top + 3) * tile_size),
+					"col": ladder_c,
+				})
+
+	# === KEY AREAS ===
+	var start_rd = room_data[(rooms_y - 1) * rooms_x + 0]
+	var start_r = start_rd.r_bot
+	var start_c = start_rd.c_left + 2
 	caves.append({
-		"x": float(start_c * tile_size + tile_size * 3),
-		"y": float(start_r * tile_size),
-		"w": 112.0, "h": 64.0,
+		"x": float((start_rd.c_left + start_rd.c_right) / 2 * tile_size),
+		"y": float(start_rd.r_top * tile_size),
+		"w": float((start_rd.c_right - start_rd.c_left) * tile_size),
+		"h": float((start_rd.r_bot - start_rd.r_top) * tile_size),
 		"type": "start",
-		"floor_y": float((start_r + 4) * tile_size)
+		"floor_y": float(start_rd.r_bot * tile_size)
 	})
 
-	# Door area (top-right corner — far from start)
-	var door_r = 8
-	var door_c = grid_cols - 14
-	_carve_room(door_r, door_c, 7, 4)
-	_make_floor(door_r + 4, door_c - 1, 9)
-
+	# Pick a random room for the door (not the start room, far enough away)
+	var start_idx = (rooms_y - 1) * rooms_x + 0
+	var door_candidates: Array = []
+	for i in room_data.size():
+		if i == start_idx or not room_data[i].active:
+			continue
+		# Must be at least 2 rooms away from start (manhattan distance)
+		var dx = absi(room_data[i].rx - room_data[start_idx].rx)
+		var dy = absi(room_data[i].ry - room_data[start_idx].ry)
+		if dx + dy >= 3:
+			door_candidates.append(i)
+	var door_idx = start_idx  # fallback
+	if door_candidates.size() > 0:
+		door_idx = door_candidates[randi() % door_candidates.size()]
+	else:
+		# fallback: top-right
+		door_idx = 0 * rooms_x + rooms_x - 1
+	var door_rd = room_data[door_idx]
 	caves.append({
-		"x": float(door_c * tile_size + tile_size * 3),
-		"y": float(door_r * tile_size),
-		"w": 112.0, "h": 64.0,
+		"x": float((door_rd.c_left + door_rd.c_right) / 2 * tile_size),
+		"y": float(door_rd.r_top * tile_size),
+		"w": float((door_rd.c_right - door_rd.c_left) * tile_size),
+		"h": float((door_rd.r_bot - door_rd.r_top) * tile_size),
 		"type": "door",
-		"floor_y": float((door_r + 4) * tile_size)
+		"floor_y": float(door_rd.r_bot * tile_size)
 	})
 
-	# === MAJOR ROUTE: winding path from start to door ===
-	_carve_path(start_r, start_c + 3, door_r, door_c + 3)
+	# Other active rooms as caves
+	for i in room_data.size():
+		var rd = room_data[i]
+		if not rd.active:
+			continue
+		if i == start_idx or i == door_idx:
+			continue
+		var cave_type = "normal"
+		caves.append({
+			"x": float((rd.c_left + rd.c_right) / 2 * tile_size),
+			"y": float(rd.r_top * tile_size),
+			"w": float((rd.c_right - rd.c_left) * tile_size),
+			"h": float((rd.r_bot - rd.r_top) * tile_size),
+			"type": cave_type,
+			"floor_y": float(rd.r_bot * tile_size)
+		})
 
-	# === SECONDARY ROUTES: alternative paths through the map ===
-	# Mid-left hub
-	var hub1_r = grid_rows / 2
-	var hub1_c = grid_cols / 4
-	_carve_room(hub1_r, hub1_c, 8, 5)
-	_make_floor(hub1_r + 5, hub1_c - 1, 10)
-	caves.append({
-		"x": float(hub1_c * tile_size + tile_size * 4),
-		"y": float(hub1_r * tile_size),
-		"w": 128.0, "h": 80.0,
-		"type": "normal",
-		"floor_y": float((hub1_r + 5) * tile_size)
-	})
-	_carve_path(start_r, start_c + 3, hub1_r, hub1_c + 4)
-
-	# Mid-right hub
-	var hub2_r = grid_rows / 2 - 5
-	var hub2_c = grid_cols * 3 / 4
-	_carve_room(hub2_r, hub2_c, 8, 5)
-	_make_floor(hub2_r + 5, hub2_c - 1, 10)
-	caves.append({
-		"x": float(hub2_c * tile_size + tile_size * 4),
-		"y": float(hub2_r * tile_size),
-		"w": 128.0, "h": 80.0,
-		"type": "normal",
-		"floor_y": float((hub2_r + 5) * tile_size)
-	})
-	_carve_path(hub1_r, hub1_c + 4, hub2_r, hub2_c + 4)
-	_carve_path(hub2_r, hub2_c + 4, door_r, door_c + 3)
-
-	# Top-left area (vertical climb)
-	var top_left_r = 10
-	var top_left_c = grid_cols / 5
-	_carve_room(top_left_r, top_left_c, 6, 4)
-	_make_floor(top_left_r + 4, top_left_c - 1, 8)
-	caves.append({
-		"x": float(top_left_c * tile_size + tile_size * 3),
-		"y": float(top_left_r * tile_size),
-		"w": 96.0, "h": 64.0,
-		"type": "normal",
-		"floor_y": float((top_left_r + 4) * tile_size)
-	})
-	_carve_path(hub1_r, hub1_c + 4, top_left_r, top_left_c + 3)
-
-	# Bottom-right area
-	var bot_right_r = grid_rows - 12
-	var bot_right_c = grid_cols * 3 / 4 + 10
-	bot_right_c = mini(bot_right_c, grid_cols - 15)
-	_carve_room(bot_right_r, bot_right_c, 6, 4)
-	_make_floor(bot_right_r + 4, bot_right_c - 1, 8)
-	caves.append({
-		"x": float(bot_right_c * tile_size + tile_size * 3),
-		"y": float(bot_right_r * tile_size),
-		"w": 96.0, "h": 64.0,
-		"type": "normal",
-		"floor_y": float((bot_right_r + 4) * tile_size)
-	})
-	_carve_path(start_r, start_c + 3, bot_right_r, bot_right_c + 3)
-	_carve_path(bot_right_r, bot_right_c + 3, hub2_r, hub2_c + 4)
-
-	# === MANY BRANCHES with dead ends, chests, combat rooms ===
-	var num_branches = randi_range(8, 12 + room_level)
-	num_branches = mini(num_branches, 18)
+	# === CHESTS (in some rooms) ===
 	var chest_count = 0
 	var max_chests = 2 + room_level / 2
 	max_chests = mini(max_chests, 5)
-	for b in num_branches:
-		var origin_r = 0
-		var origin_c = 0
-		var found = false
-		for attempt in 60:
-			origin_r = randi_range(8, grid_rows - 8)
-			origin_c = randi_range(8, grid_cols - 8)
-			if grid[origin_r][origin_c] == 0:
-				found = true
-				break
-
-		if not found:
+	for rd in room_data:
+		if not rd.active or chest_count >= max_chests:
 			continue
-
-		# Random walk to create branch (longer for big map)
-		var br = origin_r
-		var bc = origin_c
-		var dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]]
-		var dir = dirs[randi() % 4]
-		var branch_len = randi_range(10, 25)
-
-		for s in branch_len:
-			br += dir[0]
-			bc += dir[1]
-			br = clampi(br, 5, grid_rows - 6)
-			bc = clampi(bc, 5, grid_cols - 6)
-
-			# Carve 3-wide with headroom
-			for dr in range(-2, 2):
-				for dc in range(-1, 2):
-					var nr = br + dr
-					var nc = bc + dc
-					if nr > 4 and nr < grid_rows - 4 and nc > 4 and nc < grid_cols - 4:
-						grid[nr][nc] = 0
-
-			if randf() < 0.2:
-				dir = dirs[randi() % 4]
-
-		# End room (varied sizes)
-		var room_w = randi_range(4, 8)
-		var room_h = randi_range(2, 5)
-		_carve_room(br - 1, bc - 1, room_w, room_h)
-		_make_floor(br + room_h, bc - 2, room_w + 2)
-
-		var cave_type = "dead_end"
-		if chest_count < max_chests and randf() < 0.35:
-			cave_type = "chest"
+		if randf() < 0.15:
+			var cx = float((rd.c_left + rd.c_right) / 2 * tile_size)
+			var cy = float(rd.r_bot * tile_size) - 10
+			_place_chest(cx, cy)
 			chest_count += 1
 
-		caves.append({
-			"x": float(bc * tile_size),
-			"y": float(br * tile_size),
-			"w": float(room_w * tile_size),
-			"h": float(room_h * tile_size),
-			"type": cave_type,
-			"floor_y": float((br + room_h) * tile_size)
-		})
-
-		if cave_type == "chest":
-			_place_chest(float(bc * tile_size), float((br + room_h) * tile_size) - 10)
-
-	# Add extra combat rooms scattered across the map
-	var mid_rooms = randi_range(5, 10)
-	for m in mid_rooms:
-		var mr = randi_range(10, grid_rows - 10)
-		var mc = randi_range(10, grid_cols - 10)
-		var rw = randi_range(5, 10)
-		var rh = randi_range(3, 5)
-		_carve_room(mr, mc, rw, rh)
-		_make_floor(mr + rh, mc - 1, rw + 2)
-
-		caves.append({
-			"x": float(mc * tile_size + tile_size),
-			"y": float(mr * tile_size),
-			"w": float(rw * tile_size),
-			"h": float(rh * tile_size),
-			"type": "normal",
-			"floor_y": float((mr + rh) * tile_size)
-		})
-
-	# Smoothing pass for organic edges
-	var smooth_grid = []
-	for r in grid_rows:
-		var row = []
-		for c in grid_cols:
-			row.append(grid[r][c])
-		smooth_grid.append(row)
-
-	for r in range(4, grid_rows - 4):
-		for c in range(4, grid_cols - 4):
-			var n = _count_neighbors(r, c)
-			if n >= 6:
-				smooth_grid[r][c] = 1
-			elif n <= 2:
-				smooth_grid[r][c] = 0
-
-	grid = smooth_grid
-
-	# Re-enforce borders
+	# Ensure borders
 	for r in grid_rows:
 		for c in grid_cols:
-			if r < 4 or r >= grid_rows - 4 or c < 4 or c >= grid_cols - 4:
+			if r < 3 or r >= grid_rows - 3 or c < 3 or c >= grid_cols - 3:
 				grid[r][c] = 1
 
-	# Re-ensure key rooms are open after smoothing
-	_carve_room(start_r, start_c, 7, 4)
-	_make_floor(start_r + 4, start_c - 1, 9)
-	_carve_room(door_r, door_c, 7, 4)
-	_make_floor(door_r + 4, door_c - 1, 9)
-	_carve_room(hub1_r, hub1_c, 8, 5)
-	_make_floor(hub1_r + 5, hub1_c - 1, 10)
-	_carve_room(hub2_r, hub2_c, 8, 5)
-	_make_floor(hub2_r + 5, hub2_c - 1, 10)
-
-	# Flood fill from start to find disconnected caves, re-carve paths to them
+	# Connectivity
 	_ensure_all_caves_reachable(start_r, start_c)
 
-	# Ensure minimum headroom above all floors so player can jump
-	_ensure_headroom()
+	# NO extra auto-ladders — only placed at vertical room connections
+	# _add_ladders() removed — ladders only where designed above
 
-	# Add stepping stones in tall open shafts so player can climb out
-	_add_stepping_stones()
-
-	# Extract platforms list for spawn positioning
 	_extract_floor_positions()
-
-	# Compute reachable tiles for spawn validation
+	_build_oneway_platforms()
 	reachable_set = _get_reachable_tiles()
 
-	# Remove unreachable caves so enemies/items never spawn in sealed areas
+	# Remove unreachable caves
 	var valid_caves: Array = []
 	for cave in caves:
 		var cr = clampi(int(cave.y / tile_size), 0, grid_rows - 1)
@@ -685,14 +713,11 @@ func _ensure_headroom():
 					if r + 1 < grid_rows - 3:
 						grid[r + 1][c] = 0
 
-func _add_stepping_stones():
-	# Place sparse stepping stones in tall open shafts so player can climb out.
-	# Only place in very tall gaps, skip every other column, and ensure 3+ tiles
-	# open on each side so passages stay clear.
-	var min_gap_to_fix = 8  # Only fix gaps taller than 8 tiles (very tall shafts)
-	var stone_interval = 5  # Place a stone every 5 tiles vertically
+func _add_ladders():
+	# Place ladders in tall open shafts (where rooms connect vertically)
+	var min_gap = 5
 
-	for c in range(6, grid_cols - 6, 3):  # Every 3rd column only — much fewer stones
+	for c in range(5, grid_cols - 5, 4):
 		var open_run = 0
 		var run_start_r = -1
 
@@ -702,35 +727,74 @@ func _add_stepping_stones():
 					run_start_r = r
 				open_run += 1
 			else:
-				if open_run > min_gap_to_fix:
-					var bottom_r = r - 1
-					var top_r = run_start_r
-					var stone_r = bottom_r - stone_interval
-					while stone_r > top_r + 3:
-						# Check passage isn't blocked: need 3+ open tiles on left OR right
-						var left_open = 0
-						var right_open = 0
-						for dc in range(1, 4):
-							if c - dc > 2 and grid[stone_r][c - dc] == 0:
-								left_open += 1
-							if c + dc < grid_cols - 3 and grid[stone_r][c + dc] == 0:
-								right_open += 1
-
-						# Only place if there's clear passage around it
-						var has_passage = left_open >= 2 or right_open >= 2
-						# Check above and below are open (don't seal vertically)
-						var vert_clear = true
-						if stone_r - 1 >= 0 and grid[stone_r - 1][c] == 1:
-							vert_clear = false
-						if stone_r + 1 < grid_rows and grid[stone_r + 1][c] == 1:
-							vert_clear = false
-
-						if has_passage and vert_clear:
-							grid[stone_r][c] = 1  # Just 1 tile wide — minimal blockage
-
-						stone_r -= stone_interval
+				if open_run > min_gap:
+					# Check if there's already a ladder near this column
+					var has_nearby = false
+					for lad in ladders:
+						if abs(lad.col - c) < 5 and abs(lad.y_top - run_start_r * tile_size) < 80:
+							has_nearby = true
+							break
+					if not has_nearby:
+						var lx = c * tile_size + tile_size / 2
+						ladders.append({
+							"x": lx,
+							"y_top": float(run_start_r * tile_size),
+							"y_bottom": float(r * tile_size),
+							"col": c,
+						})
 				open_run = 0
 				run_start_r = -1
+
+func _build_start_room(rd: Dictionary):
+	# Fixed starting room — clean, empty, safe space
+	# No blocks, no enemies — just flat ground and torches
+	var cl = rd.c_left
+	var cr = rd.c_right
+	var rt = rd.r_top
+	var rb = rd.r_bot
+
+	# Clear the entire room interior — no random blocks
+	for r in range(rt, rb + 1):
+		for c in range(cl, cr + 1):
+			grid[r][c] = 0
+
+	# Solid floor
+	for c in range(cl - 1, cr + 2):
+		if c >= 0 and c < grid_cols and rb + 1 < grid_rows:
+			grid[rb + 1][c] = 1
+
+	# Two torches to light the room
+	var torch_script = load("res://scripts/torch.gd")
+	var torch = Node2D.new()
+	torch.set_script(torch_script)
+	var tx = float((cl + 3) * tile_size)
+	var ty = float((rb - 1) * tile_size)
+	torch.position = Vector2(tx, ty)
+	torch_positions.append(Vector2(tx, ty))
+	add_child(torch)
+
+	var torch2 = Node2D.new()
+	torch2.set_script(torch_script)
+	var tx2 = float((cr - 3) * tile_size)
+	var ty2 = float((rb - 1) * tile_size)
+	torch2.position = Vector2(tx2, ty2)
+	torch_positions.append(Vector2(tx2, ty2))
+	add_child(torch2)
+
+func _build_oneway_platforms():
+	# One-way platforms on layer 6 (bit 32) — separate from solid walls (layer 3)
+	for plat in oneway_platforms:
+		var wall = StaticBody2D.new()
+		wall.position = Vector2(plat.x + plat.w / 2.0, plat.y + 2.0)
+		wall.collision_layer = 32  # layer 6
+		wall.collision_mask = 0
+		var shape = CollisionShape2D.new()
+		var rect = RectangleShape2D.new()
+		rect.size = Vector2(plat.w, 4.0)
+		shape.shape = rect
+		shape.one_way_collision = true
+		wall.add_child(shape)
+		add_child(wall)
 
 func _ensure_all_caves_reachable(start_r: int, start_c: int):
 	# Flood fill from start position
@@ -924,21 +988,22 @@ func _calculate_dark_zones():
 		x += scan_step
 
 func _spawn_enemies(enemy_scene: PackedScene, p_player_ref: CharacterBody2D):
-	# More enemies for larger map
-	var enemy_count = 6 + room_level * 2
-	enemy_count = mini(enemy_count, 20)
+	# Big map with many enemies — player can skip some, so spawn more
+	# ~40% more to compensate for optional combat
+	var enemy_count = 22 + room_level * 4
+	enemy_count = mini(enemy_count, 60)
 
 	var weighted_classes: Array = []
-	weighted_classes.append([0, 3])  # ARCHER
+	weighted_classes.append([0, 4])  # ARCHER (common)
 	if room_level >= 2:
 		weighted_classes.append([2, 3])  # THROWER
 	if room_level >= 3:
-		weighted_classes.append([1, 2])  # CROSSBOW
-	weighted_classes.append([3, 1])  # SHIELDMAN
+		weighted_classes.append([1, 3])  # CROSSBOW
+	weighted_classes.append([3, 1])  # SHIELDMAN (rare)
 
 	var shieldman_count = 0
-	var max_shieldmen = 2 + (room_level / 3)
-	max_shieldmen = mini(max_shieldmen, 4)
+	var max_shieldmen = 3 + (room_level / 3)
+	max_shieldmen = mini(max_shieldmen, 6)
 
 	for i in enemy_count:
 		var enemy = enemy_scene.instantiate()
@@ -950,14 +1015,14 @@ func _spawn_enemies(enemy_scene: PackedScene, p_player_ref: CharacterBody2D):
 			else:
 				shieldman_count += 1
 
-		var hp = (2 + room_level) * 20
-		var spd = 30.0 + room_level * 5  # Faster scaling per level
-		var dmg = 20 * (1 + room_level / 3)
-		# Level 5+: enemies deal 2x damage
+		# Weaker per enemy: ~half HP, ~2/3 damage vs old formula
+		var hp = (1 + room_level) * 12
+		var spd = 30.0 + room_level * 4
+		var dmg = 12 * (1 + room_level / 4)
 		if room_level >= 5:
-			dmg *= 2
+			dmg = int(dmg * 1.5)
 		if eclass == 3:
-			hp += 40
+			hp += 20
 
 		enemy.setup(eclass, hp, spd, dmg)
 		enemy.player = p_player_ref
@@ -1058,9 +1123,18 @@ func _process(delta):
 		_check_station_proximity()
 	if trial_heart_pos != Vector2.ZERO:
 		_check_heart_proximity()
-	# Only redraw when proximity state CHANGES (not every frame)
+	# Redraw when proximity changes
 	if player_near_station != old_station or player_near_heart != old_heart:
 		queue_redraw()
+
+	# Viewport culling: redraw when camera moves to new tile area
+	if not is_boss_room and player_ref and is_instance_valid(player_ref):
+		var cam_tx = int(player_ref.global_position.x / tile_size / 8)
+		var cam_ty = int(player_ref.global_position.y / tile_size / 8)
+		if cam_tx != _last_cam_tile_x or cam_ty != _last_cam_tile_y:
+			_last_cam_tile_x = cam_tx
+			_last_cam_tile_y = cam_ty
+			queue_redraw()
 
 	# Boss room lava damage
 	if is_boss_room and player_ref and is_instance_valid(player_ref):
@@ -1851,6 +1925,26 @@ func _tile_shade(r: int, c: int) -> float:
 	var n = (r * 127 + c * 311 + room_level * 37)
 	return fmod(abs(sin(float(n) * 0.7134)) * 43758.5453, 1.0) * 0.06 - 0.03
 
+func _get_visible_tile_range() -> Array:
+	# Calculate which tile rows/cols are visible on screen (with margin)
+	var vp = get_viewport()
+	if not vp:
+		return [0, grid_cols, 0, grid_rows]
+	var canvas_xform = get_global_transform()
+	var vp_xform = vp.get_canvas_transform()
+	var combined = vp_xform * canvas_xform
+	var inv = combined.affine_inverse()
+	var vp_size = vp.get_visible_rect().size
+	# Top-left and bottom-right of visible area in local coords
+	var tl = inv * Vector2.ZERO
+	var br = inv * vp_size
+	var margin = 10  # large margin to prevent decoration flicker at edges
+	var c_min = maxi(0, int(tl.x / tile_size) - margin)
+	var c_max = mini(grid_cols, int(br.x / tile_size) + margin + 1)
+	var r_min = maxi(0, int(tl.y / tile_size) - margin)
+	var r_max = mini(grid_rows, int(br.y / tile_size) + margin + 1)
+	return [c_min, c_max, r_min, r_max]
+
 func _draw():
 	# Dark background
 	draw_rect(Rect2(0, 0, room_width, room_height), bg_color)
@@ -1881,15 +1975,25 @@ func _draw():
 	# Trial heart
 	_draw_trial_heart()
 
+	# Vines / lianas
+	_draw_ladders()
+	_draw_oneway_platforms()
+
 	# Chests
 	_draw_chests()
 
 func _draw_solid_tiles():
-	# Draw merged horizontal runs of solid tiles (optimized: no per-tile shading)
-	for r in grid_rows:
+	# Only draw tiles visible on screen (viewport culling)
+	var vr = _get_visible_tile_range()
+	var c_min = vr[0]
+	var c_max = vr[1]
+	var r_min = vr[2]
+	var r_max = vr[3]
+
+	for r in range(r_min, r_max):
 		var run_start = -1
-		for c in range(grid_cols + 1):
-			var is_solid = c < grid_cols and grid[r][c] == 1
+		for c in range(c_min, c_max + 1):
+			var is_solid = c < c_max and c < grid_cols and grid[r][c] == 1
 			if is_solid:
 				if run_start == -1:
 					run_start = c
@@ -1898,22 +2002,24 @@ func _draw_solid_tiles():
 					var x = run_start * tile_size
 					var y = r * tile_size
 					var w = (c - run_start) * tile_size
-					# Single draw call per run — much faster on large maps
 					draw_rect(Rect2(x, y, w, tile_size), rock_color)
-					# Subtle inner shade (1 draw per run, not per tile)
 					draw_rect(Rect2(x + 1, y + 1, w - 2, tile_size - 2), rock_dark)
 					run_start = -1
 
 func _draw_surface_edges():
-	# Optimized: merge floor/ceiling edges into horizontal runs
+	var vr = _get_visible_tile_range()
+	var c_min = vr[0]
+	var c_max = vr[1]
+	var r_min = vr[2]
+	var r_max = vr[3]
 	var ceil_col = Color(rock_dark.r - 0.05, rock_dark.g - 0.05, rock_dark.b - 0.03)
 	var light_col = Color(rock_light.r, rock_light.g, rock_light.b, 0.5)
 
-	# Floor surfaces — merged runs
-	for r in range(1, grid_rows):
+	# Floor surfaces — merged runs (only visible rows)
+	for r in range(maxi(1, r_min), r_max):
 		var run_start = -1
-		for c in range(grid_cols + 1):
-			var is_floor = c < grid_cols and grid[r][c] == 1 and grid[r - 1][c] == 0
+		for c in range(c_min, c_max + 1):
+			var is_floor = c < c_max and c < grid_cols and grid[r][c] == 1 and grid[r - 1][c] == 0
 			if is_floor:
 				if run_start == -1:
 					run_start = c
@@ -1925,11 +2031,11 @@ func _draw_surface_edges():
 					draw_rect(Rect2(x + 1, r * tile_size + 2, w - 2, 3), light_col)
 					run_start = -1
 
-	# Ceiling surfaces — merged runs
-	for r in range(0, grid_rows - 1):
+	# Ceiling surfaces — merged runs (only visible rows)
+	for r in range(r_min, mini(grid_rows - 1, r_max)):
 		var run_start = -1
-		for c in range(grid_cols + 1):
-			var is_ceil = c < grid_cols and grid[r][c] == 1 and grid[r + 1][c] == 0
+		for c in range(c_min, c_max + 1):
+			var is_ceil = c < c_max and c < grid_cols and grid[r][c] == 1 and grid[r + 1][c] == 0
 			if is_ceil:
 				if run_start == -1:
 					run_start = c
@@ -1979,25 +2085,32 @@ func _draw_lava():
 			"GOLEM", HORIZONTAL_ALIGNMENT_CENTER, -1, 16, Color(0.9, 0.4, 0.1, 0.8))
 
 func _draw_decorations():
-	# Stalactites hanging from ceiling surfaces
-	for c in range(5, grid_cols - 5, 4):
-		for r in range(3, grid_rows - 3):
+	var vr = _get_visible_tile_range()
+	var c_min = vr[0]
+	var c_max = vr[1]
+	var r_min = vr[2]
+	var r_max = vr[3]
+
+	# Stalactites hanging from ceiling surfaces (only visible)
+	var c_start_s = maxi(5, c_min - (c_min % 4))
+	for c in range(c_start_s, mini(grid_cols - 5, c_max), 4):
+		for r in range(maxi(3, r_min), mini(grid_rows - 3, r_max)):
 			if grid[r][c] == 1 and r + 1 < grid_rows and grid[r + 1][c] == 0:
 				var shade = _tile_shade(r, c)
-				if shade > 0.01:  # Only some ceilings get stalactites
+				if shade > 0.01:
 					var sx = c * tile_size + tile_size / 2
 					var sy = (r + 1) * tile_size
 					var sh = 4 + int(abs(shade) * 200) % 10
 					var sw = 2 + int(abs(shade) * 100) % 3
 					draw_rect(Rect2(sx - sw / 2, sy, sw, sh),
 						Color(rock_dark.r + 0.05, rock_dark.g + 0.04, rock_dark.b + 0.02))
-					# Point
 					draw_line(Vector2(sx, sy + sh), Vector2(sx, sy + sh + 2),
 						Color(rock_dark.r, rock_dark.g, rock_dark.b), 1.0)
 
-	# Moss on some floor tiles
-	for c in range(4, grid_cols - 4, 6):
-		for r in range(3, grid_rows - 3):
+	# Moss on some floor tiles (only visible)
+	var c_start_m = maxi(4, c_min - (c_min % 6))
+	for c in range(c_start_m, mini(grid_cols - 4, c_max), 6):
+		for r in range(maxi(3, r_min), mini(grid_rows - 3, r_max)):
 			if grid[r][c] == 1 and r > 0 and grid[r - 1][c] == 0:
 				var shade = _tile_shade(r, c + 1)
 				if shade < -0.01:
@@ -2015,6 +2128,79 @@ func _draw_decorations():
 				draw_circle(Vector2(bx, by - 2), 3, Color(0.7, 0.65, 0.55, 0.3))
 				draw_rect(Rect2(bx - 2, by - 4, 1, 1), Color(0.1, 0.1, 0.1, 0.3))
 				draw_rect(Rect2(bx + 1, by - 4, 1, 1), Color(0.1, 0.1, 0.1, 0.3))
+
+	# === VASES on floors (deterministic placement using tile_shade) ===
+	for c in range(maxi(5, c_min), mini(grid_cols - 5, c_max), 7):
+		for r in range(maxi(4, r_min), mini(grid_rows - 4, r_max)):
+			if grid[r][c] == 1 and r > 0 and grid[r - 1][c] == 0:
+				var shade = _tile_shade(r, c)
+				if shade > 0.015:
+					var vx = c * tile_size + tile_size / 2
+					var vy = r * tile_size
+					var vtype = int(abs(shade) * 1000) % 3  # 0=tall, 1=round, 2=small
+
+					if vtype == 0:
+						# Tall vase
+						draw_rect(Rect2(vx - 3, vy - 10, 6, 10), Color(0.55, 0.35, 0.2, 0.8))
+						draw_rect(Rect2(vx - 4, vy - 11, 8, 2), Color(0.6, 0.4, 0.25, 0.8))
+						draw_rect(Rect2(vx - 2, vy - 12, 4, 2), Color(0.5, 0.3, 0.18, 0.8))
+						# Pattern
+						draw_line(Vector2(vx - 2, vy - 6), Vector2(vx + 2, vy - 6),
+							Color(0.7, 0.5, 0.3, 0.5), 1.0)
+					elif vtype == 1:
+						# Round pot
+						draw_circle(Vector2(vx, vy - 5), 4, Color(0.5, 0.32, 0.18, 0.8))
+						draw_rect(Rect2(vx - 3, vy - 2, 6, 2), Color(0.45, 0.3, 0.15, 0.8))
+						draw_rect(Rect2(vx - 2, vy - 9, 4, 2), Color(0.55, 0.35, 0.2, 0.7))
+					else:
+						# Small jar
+						draw_rect(Rect2(vx - 2, vy - 6, 4, 6), Color(0.5, 0.38, 0.22, 0.8))
+						draw_rect(Rect2(vx - 1, vy - 7, 2, 1), Color(0.55, 0.4, 0.25, 0.7))
+
+	# === BUSHES / grass tufts on floors ===
+	for c in range(maxi(4, c_min), mini(grid_cols - 4, c_max), 5):
+		for r in range(maxi(4, r_min), mini(grid_rows - 4, r_max)):
+			if grid[r][c] == 1 and r > 0 and grid[r - 1][c] == 0:
+				var shade = _tile_shade(r, c + 2)
+				if shade < -0.005:
+					var bx = c * tile_size + tile_size / 2
+					var by = r * tile_size
+					var btype = int(abs(shade) * 2000) % 3
+
+					if btype == 0:
+						# Small bush (3 circles)
+						draw_circle(Vector2(bx - 3, by - 4), 3, Color(0.2, 0.38, 0.15, 0.65))
+						draw_circle(Vector2(bx + 2, by - 5), 4, Color(0.18, 0.42, 0.13, 0.6))
+						draw_circle(Vector2(bx, by - 6), 3, Color(0.22, 0.45, 0.17, 0.55))
+					elif btype == 1:
+						# Grass tuft (lines sticking up)
+						for gi in range(-3, 4):
+							var gh = 3 + int(abs(sin(float(gi + c) * 2.3)) * 5)
+							draw_line(Vector2(bx + gi * 2, by),
+								Vector2(bx + gi * 2 + 1, by - gh),
+								Color(0.2, 0.4, 0.15, 0.5), 1.0)
+					else:
+						# Weeds
+						draw_line(Vector2(bx - 2, by), Vector2(bx - 4, by - 7),
+							Color(0.25, 0.4, 0.18, 0.5), 1.0)
+						draw_line(Vector2(bx, by), Vector2(bx + 1, by - 8),
+							Color(0.22, 0.38, 0.15, 0.5), 1.0)
+						draw_line(Vector2(bx + 3, by), Vector2(bx + 5, by - 6),
+							Color(0.25, 0.42, 0.17, 0.45), 1.0)
+
+	# === CHAINS hanging from ceilings ===
+	for c in range(maxi(5, c_min), mini(grid_cols - 5, c_max), 11):
+		for r in range(maxi(3, r_min), mini(grid_rows - 3, r_max)):
+			if grid[r][c] == 1 and r + 1 < grid_rows and grid[r + 1][c] == 0:
+				var shade = _tile_shade(r, c + 3)
+				if shade > 0.02:
+					var cx = c * tile_size + tile_size / 2
+					var cy = (r + 1) * tile_size
+					var chain_len = 3 + int(abs(shade) * 200) % 6
+					for ci in range(chain_len):
+						var link_y = cy + ci * 4
+						var col_a = Color(0.4, 0.38, 0.35, 0.6) if ci % 2 == 0 else Color(0.35, 0.33, 0.3, 0.5)
+						draw_rect(Rect2(cx - 1, link_y, 2, 3), col_a)
 
 func _draw_ore_blocks():
 	for ore in ore_blocks:
@@ -2125,6 +2311,68 @@ func _draw_trial_heart():
 	if player_near_heart:
 		draw_string(ThemeDB.fallback_font, Vector2(hx - 25, hy - 16),
 			"[E] Trial (+50% HP)", HORIZONTAL_ALIGNMENT_CENTER, -1, 8, Color(1, 0.3, 0.3, 0.9))
+
+func get_ladder_at(px: float, py: float) -> Dictionary:
+	# Check if position is near a ladder (for climbing)
+	for lad in ladders:
+		if abs(px - lad.x) < 24 and py >= lad.y_top - 24 and py <= lad.y_bottom + 8:
+			return lad
+	return {}
+
+# Legacy compatibility
+func get_vine_at(px: float, py: float) -> Dictionary:
+	return get_ladder_at(px, py)
+
+func _draw_ladders():
+	var vr = _get_visible_tile_range()
+	var c_min = vr[0]
+	var c_max = vr[1]
+	var r_min_px = vr[2] * tile_size - 32
+	var r_max_px = vr[3] * tile_size + 32
+
+	var rail_col = Color(0.45, 0.35, 0.2, 0.9)
+	var rung_col = Color(0.5, 0.4, 0.25, 0.85)
+
+	for lad in ladders:
+		if lad.col < c_min - 1 or lad.col > c_max + 1:
+			continue
+		if lad.y_bottom < r_min_px or lad.y_top > r_max_px:
+			continue
+
+		var lx = lad.x
+		var ly_top = lad.y_top
+		var ly_bot = lad.y_bottom
+		var lad_len = ly_bot - ly_top
+
+		# Two vertical rails
+		draw_line(Vector2(lx - 4, ly_top), Vector2(lx - 4, ly_bot), rail_col, 1.5)
+		draw_line(Vector2(lx + 4, ly_top), Vector2(lx + 4, ly_bot), rail_col, 1.5)
+
+		# Horizontal rungs every 10px
+		var rung_step = 10
+		for i in range(0, int(lad_len), rung_step):
+			var ry = ly_top + i + 4
+			if ry < ly_bot:
+				draw_line(Vector2(lx - 4, ry), Vector2(lx + 4, ry), rung_col, 1.0)
+
+		# Top bracket
+		draw_rect(Rect2(lx - 5, ly_top - 2, 10, 3), rail_col)
+
+func _draw_oneway_platforms():
+	var vr = _get_visible_tile_range()
+	var c_min_px = vr[0] * tile_size - 32
+	var c_max_px = vr[1] * tile_size + 32
+
+	for plat in oneway_platforms:
+		if plat.x + plat.w < c_min_px or plat.x > c_max_px:
+			continue
+		# Thin platform line (can jump through from below)
+		draw_rect(Rect2(plat.x, plat.y, plat.w, 3), surface_color)
+		draw_rect(Rect2(plat.x, plat.y + 3, plat.w, 1), rock_dark)
+		# Dotted underside (visual cue: one-way)
+		for dx in range(0, int(plat.w), 8):
+			draw_rect(Rect2(plat.x + dx + 1, plat.y + 4, 3, 1),
+				Color(rock_dark.r, rock_dark.g, rock_dark.b, 0.3))
 
 func _draw_chests():
 	for chest in chests:

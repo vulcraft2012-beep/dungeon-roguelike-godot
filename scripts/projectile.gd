@@ -106,7 +106,7 @@ func _explode():
 	var explosion = Node2D.new()
 	explosion.set_script(load("res://scripts/explosion_effect.gd"))
 	explosion.global_position = global_position
-	get_tree().current_scene.add_child(explosion)
+	get_parent().add_child(explosion)
 
 	queue_free()
 

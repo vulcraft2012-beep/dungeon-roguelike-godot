@@ -270,7 +270,7 @@ func _spawn_projectile(type: int, dir: Vector2):
 	proj.damage = damage
 	proj.global_position = global_position + Vector2(0, -10) + dir.normalized() * 10
 	proj.rotation = dir.angle()
-	get_tree().current_scene.add_child(proj)
+	get_parent().add_child(proj)
 
 func _melee_attack():
 	can_attack = false

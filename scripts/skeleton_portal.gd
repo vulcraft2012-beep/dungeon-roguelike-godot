@@ -164,7 +164,7 @@ func _shoot_arrow():
 	proj.damage = damage
 	proj.global_position = global_position + Vector2(0, -14) + dir * 18
 	proj.rotation = dir.angle()
-	get_tree().current_scene.add_child(proj)
+	get_parent().add_child(proj)
 
 	# Recoil
 	velocity = -dir * 30
